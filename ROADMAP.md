@@ -360,6 +360,31 @@ Trained from scratch (Tanh bottleneck) on 20k KQ vs K + KR vs K positions with a
 - SF reeval job ready to submit after parse completes
 - Training job: SF dataset primary + 15% endgame stage 1+2 anchors
 
+### Monitoring current parse job
+
+```bash
+bjobs                                          # check status
+tail -f ~/logs/parse_lichess_<JOBID>.out       # watch progress (prints every 10k games)
+cat ~/logs/parse_lichess_<JOBID>.err           # check errors
+ls -lh ~/Petra-ver2/data/dataset.pt            # confirm output exists when done
+```
+
+### Next steps (in order)
+
+```bash
+# 1. After parse completes — submit SF reeval
+bsub < ~/Petra-ver2/jobs/reeval_sf.sh
+
+# 2. After reeval completes — submit GPU training
+bsub < ~/Petra-ver2/jobs/train_sf_gpu.sh      # (to be written)
+
+# 3. After training — run geometry probe
+python3 src/generate_endgame.py --positions 5000 --stages 1 2 --out ~/Petra-ver2/data/endgame_probe.pt
+python3 src/probe_geometry.py --model ~/Petra-ver2/models/sf_gpu/best.pt --dataset ~/Petra-ver2/data/endgame_probe.pt --n 5000
+```
+
+**Gate criterion:** effective rank > 30. Centroid cosine and separation gap are secondary — they were trivially perfect on 1D geometry and will naturally drop as rank expands. That is expected and correct.
+
 ---
 
 ## Milestones
