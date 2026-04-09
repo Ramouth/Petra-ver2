@@ -1,0 +1,457 @@
+"""
+Endgame curriculum position generator for PetraNet.
+
+Generates random legal endgame positions and their antipodal mirror pairs,
+labels them by rule (no Stockfish needed for single-piece endgames), and
+saves a dataset compatible with train.py.
+
+Label convention — side-to-move relative:
+  Stronger side to move → +1.0
+  Weaker   side to move → -1.0
+
+Stages
+------
+  1 = KQ vs K     (queen wins)
+  2 = KR vs K     (rook wins)
+  3 = KP vs K     (pawn wins — noisy, some draws, useful for pawn geometry)
+  4 = KQ vs KR    (queen beats rook)
+  5 = KR vs KP    (rook beats pawn)
+  6 = KB vs KP    (bishop beats pawn)
+  7 = KN vs KP    (knight beats pawn)
+  8 = KP vs KP    (more advanced pawn wins — advancement label)
+
+Usage
+-----
+    # Standalone: build a fixed dataset
+    python3 generate_endgame.py --positions 10000 --stages 1 2 --out data/endgame.pt
+
+    # In train.py: per-epoch regeneration (prevents memorisation)
+    python3 train.py --endgame-positions 20000 --endgame-stages 1 2 --out models/endgame/
+"""
+
+import argparse
+import os
+import random
+import sys
+
+import chess
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from board import board_to_tensor, move_to_index
+
+
+# ---------------------------------------------------------------------------
+# Position generators — one per stage
+# ---------------------------------------------------------------------------
+
+def random_kqk_position(white_has_queen: bool = True) -> chess.Board:
+    """KQ vs K. white_has_queen=False gives the antipodal mirror."""
+    while True:
+        squares = random.sample(range(64), 3)
+        wk_sq, piece_sq, bk_sq = squares
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING, chess.WHITE))
+        if white_has_queen:
+            board.set_piece_at(piece_sq, chess.Piece(chess.QUEEN, chess.WHITE))
+        else:
+            board.set_piece_at(piece_sq, chess.Piece(chess.QUEEN, chess.BLACK))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_krk_position(white_has_rook: bool = True) -> chess.Board:
+    """KR vs K. white_has_rook=False gives the antipodal mirror."""
+    while True:
+        squares = random.sample(range(64), 3)
+        wk_sq, piece_sq, bk_sq = squares
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING, chess.WHITE))
+        if white_has_rook:
+            board.set_piece_at(piece_sq, chess.Piece(chess.ROOK, chess.WHITE))
+        else:
+            board.set_piece_at(piece_sq, chess.Piece(chess.ROOK, chess.BLACK))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_kpk_position(white_has_pawn: bool = True) -> chess.Board:
+    """KP vs K. Pawn on ranks 2–7 (never back rank or 8th). Labels are noisy."""
+    pawn_squares = [sq for sq in range(64) if 1 <= chess.square_rank(sq) <= 6]
+    while True:
+        pawn_sq = random.choice(pawn_squares)
+        remaining = [sq for sq in range(64) if sq != pawn_sq]
+        wk_sq, bk_sq = random.sample(remaining, 2)
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING, chess.WHITE))
+        if white_has_pawn:
+            board.set_piece_at(pawn_sq, chess.Piece(chess.PAWN, chess.WHITE))
+        else:
+            board.set_piece_at(pawn_sq, chess.Piece(chess.PAWN, chess.BLACK))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_4piece_position(white_piece: int, black_piece: int,
+                            white_piece_on_ranks=None,
+                            black_piece_on_ranks=None) -> chess.Board:
+    """
+    4-piece position: WK + white_piece vs BK + black_piece.
+    Caller decides which side is stronger and assigns label accordingly.
+    """
+    def valid_squares(ranks):
+        if ranks is not None:
+            return [sq for sq in range(64) if chess.square_rank(sq) in ranks]
+        return list(range(64))
+
+    wp_squares = valid_squares(white_piece_on_ranks)
+    bp_squares = valid_squares(black_piece_on_ranks)
+
+    while True:
+        wp_sq = random.choice(wp_squares)
+        bp_sq = random.choice(bp_squares)
+        if wp_sq == bp_sq:
+            continue
+        remaining = [sq for sq in range(64) if sq not in (wp_sq, bp_sq)]
+        wk_sq, bk_sq = random.sample(remaining, 2)
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING,  chess.WHITE))
+        board.set_piece_at(wp_sq, chess.Piece(white_piece, chess.WHITE))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING,  chess.BLACK))
+        board.set_piece_at(bp_sq, chess.Piece(black_piece, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_kp_kp_position(white_more_advanced: bool = True) -> chess.Board:
+    """
+    KP vs KP — both sides have a pawn, more-advanced pawn wins.
+    Labels by pawn rank; skips equal-advancement (ambiguous).
+    """
+    pawn_ranks = list(range(1, 7))
+    while True:
+        wp_sq = random.choice([sq for sq in range(64) if chess.square_rank(sq) in pawn_ranks])
+        bp_sq = random.choice([sq for sq in range(64) if chess.square_rank(sq) in pawn_ranks])
+        if wp_sq == bp_sq:
+            continue
+
+        white_adv = chess.square_rank(wp_sq)       # higher = closer to promotion
+        black_adv = 7 - chess.square_rank(bp_sq)   # lower rank = closer for black
+
+        if white_adv == black_adv:
+            continue
+        if white_more_advanced and white_adv <= black_adv:
+            continue
+        if not white_more_advanced and black_adv <= white_adv:
+            continue
+
+        remaining = [sq for sq in range(64) if sq not in (wp_sq, bp_sq)]
+        wk_sq, bk_sq = random.sample(remaining, 2)
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING, chess.WHITE))
+        board.set_piece_at(wp_sq, chess.Piece(chess.PAWN, chess.WHITE))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING, chess.BLACK))
+        board.set_piece_at(bp_sq, chess.Piece(chess.PAWN, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+# ---------------------------------------------------------------------------
+# Stage registry
+# ---------------------------------------------------------------------------
+
+_PAWN_RANKS = list(range(1, 7))
+
+_STAGE_GENERATORS = {
+    # pos_fn returns "white wins" position; mirror_fn returns "black wins" position
+    1: (lambda: random_kqk_position(white_has_queen=True),
+        lambda: random_kqk_position(white_has_queen=False)),
+    2: (lambda: random_krk_position(white_has_rook=True),
+        lambda: random_krk_position(white_has_rook=False)),
+    3: (lambda: random_kpk_position(white_has_pawn=True),
+        lambda: random_kpk_position(white_has_pawn=False)),
+    4: (lambda: random_4piece_position(chess.QUEEN, chess.ROOK),
+        lambda: random_4piece_position(chess.ROOK,  chess.QUEEN)),
+    5: (lambda: random_4piece_position(chess.ROOK, chess.PAWN,
+                                        black_piece_on_ranks=_PAWN_RANKS),
+        lambda: random_4piece_position(chess.PAWN, chess.ROOK,
+                                        white_piece_on_ranks=_PAWN_RANKS)),
+    6: (lambda: random_4piece_position(chess.BISHOP, chess.PAWN,
+                                        black_piece_on_ranks=_PAWN_RANKS),
+        lambda: random_4piece_position(chess.PAWN, chess.BISHOP,
+                                        white_piece_on_ranks=_PAWN_RANKS)),
+    7: (lambda: random_4piece_position(chess.KNIGHT, chess.PAWN,
+                                        black_piece_on_ranks=_PAWN_RANKS),
+        lambda: random_4piece_position(chess.PAWN, chess.KNIGHT,
+                                        white_piece_on_ranks=_PAWN_RANKS)),
+    8: (lambda: random_kp_kp_position(white_more_advanced=True),
+        lambda: random_kp_kp_position(white_more_advanced=False)),
+}
+
+STAGE_NAMES = {
+    1: "KQ vs K", 2: "KR vs K", 3: "KP vs K",
+    4: "KQ vs KR", 5: "KR vs KP", 6: "KB vs KP",
+    7: "KN vs KP", 8: "KP vs KP",
+}
+
+
+# ---------------------------------------------------------------------------
+# Position generation
+# ---------------------------------------------------------------------------
+
+def generate_positions(n: int, include_mirrors: bool = True, stages=None):
+    """
+    Generate n endgame positions, mixed across one or more stages.
+
+    Each position is generated in two turn variants:
+      - White to move  (+1.0 if white wins, -1.0 if black wins)
+      - Black to move  (label flipped vs W2M)
+
+    If include_mirrors=True (default), each position is also paired with its
+    color-flipped mirror, giving up to 4 variants per sampled position.
+    Mirrors are antipodal partners — opposite label, opposite geometry.
+
+    Returns list of (board, value) tuples, shuffled.
+    """
+    if stages is None:
+        stages = [1]
+    if isinstance(stages, int):
+        stages = [stages]
+
+    for s in stages:
+        if s not in _STAGE_GENERATORS:
+            raise ValueError(f"Unknown endgame stage: {s}. Valid: {sorted(_STAGE_GENERATORS)}")
+
+    n_per_stage = [n // len(stages)] * len(stages)
+    n_per_stage[-1] += n - sum(n_per_stage)
+
+    all_positions = []
+    for stage, n_stage in zip(stages, n_per_stage):
+        pos_fn, mirror_fn = _STAGE_GENERATORS[stage]
+        generated = 0
+        seen_fens = set()
+
+        while generated < n_stage:
+            # Primary position — white side has the winning piece
+            board = pos_fn()
+            fen = board.board_fen()
+            if fen in seen_fens:
+                continue
+            seen_fens.add(fen)
+
+            # White to move: white wins → +1.0
+            all_positions.append((board, +1.0))
+
+            # Same position, black to move: white still has piece but black to move → -1.0
+            board_btm = board.copy()
+            board_btm.turn = chess.BLACK
+            if board_btm.is_valid() and not board_btm.is_game_over():
+                all_positions.append((board_btm, -1.0))
+
+            if include_mirrors:
+                # Mirror: black side has the winning piece
+                mirror = mirror_fn()
+                # White to move: black wins → -1.0
+                all_positions.append((mirror, -1.0))
+                # Black to move: black wins → +1.0
+                mirror_btm = mirror.copy()
+                mirror_btm.turn = chess.BLACK
+                if mirror_btm.is_valid() and not mirror_btm.is_game_over():
+                    all_positions.append((mirror_btm, +1.0))
+
+            generated += 1
+
+    random.shuffle(all_positions)
+    return all_positions
+
+
+# ---------------------------------------------------------------------------
+# Optional Stockfish verification
+# ---------------------------------------------------------------------------
+
+def label_with_stockfish(positions, stockfish_path: str, depth: int = 5):
+    """
+    Replace rule-based labels with Stockfish evaluations.
+    Useful for verification of stages 3–8 where rule labels are approximate.
+    Returns list of (board, value) with SF-derived STM-relative values.
+    """
+    import math
+    import chess.engine
+
+    print(f"  Verifying/re-labelling with Stockfish depth {depth} ...")
+    engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+    result = []
+    for i, (board, _) in enumerate(positions):
+        info = engine.analyse(board, chess.engine.Limit(depth=depth))
+        score = info["score"].white()
+        if score.is_mate():
+            m = score.mate()
+            val = 1.0 if m > 0 else -1.0
+        else:
+            cp = score.score(mate_score=10000)
+            val = math.tanh(cp / 400.0)
+        # Convert to STM-relative
+        if board.turn == chess.BLACK:
+            val = -val
+        result.append((board, val))
+        if (i + 1) % 500 == 0:
+            print(f"    {i+1}/{len(positions)}")
+    engine.quit()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dataset builder
+# ---------------------------------------------------------------------------
+
+def build_dataset(positions, val_frac: float = 0.1):
+    """
+    Convert list of (board, value) to a train.py-compatible dataset dict.
+
+    Policy target: uniform over legal moves. Policy loss on endgame positions
+    without MCTS is not meaningful — use --policy-weight 0 in train.py to
+    train value-only on the endgame curriculum.
+
+    Important: move_to_index is called with flip=(board.turn == chess.BLACK)
+    so move indices are always in STM-relative coordinates, matching the
+    board tensor representation.
+    """
+    random.shuffle(positions)
+    n_val = max(1, int(len(positions) * val_frac))
+    splits = {
+        "train": positions[n_val:],
+        "val":   positions[:n_val],
+    }
+
+    data = {}
+    for split_name, split in splits.items():
+        tensors     = []
+        values      = []
+        move_idxs   = []
+        visit_dists = []
+
+        for board, value in split:
+            tensors.append(board_to_tensor(board))
+            values.append(value)
+
+            # Uniform policy over legal moves in STM-relative coordinates
+            flip  = (board.turn == chess.BLACK)
+            legal = list(board.legal_moves)
+            vd    = torch.zeros(4096, dtype=torch.float32)
+            if legal:
+                w = 1.0 / len(legal)
+                for m in legal:
+                    vd[move_to_index(m, flip=flip)] = w
+                move_idxs.append(move_to_index(legal[0], flip=flip))
+            else:
+                move_idxs.append(0)
+            visit_dists.append(vd)
+
+        data[split_name] = {
+            "tensors":     torch.stack(tensors).to(torch.uint8),
+            "values":      torch.tensor(values, dtype=torch.float32),
+            "move_idxs":   torch.tensor(move_idxs, dtype=torch.int64),
+            "visit_dists": torch.stack(visit_dists),
+        }
+
+    n_train    = len(data["train"]["tensors"])
+    n_val_act  = len(data["val"]["tensors"])
+    pos_values = data["train"]["values"]
+    wins       = (pos_values >  0.5).sum().item()
+    losses     = (pos_values < -0.5).sum().item()
+
+    data["meta"] = {
+        "source":     "endgame",
+        "n_train":    n_train,
+        "n_val":      n_val_act,
+        "label_mean": float(pos_values.mean()),
+        "label_std":  float(pos_values.std()),
+        "pct_win":    wins   / n_train,
+        "pct_loss":   losses / n_train,
+    }
+
+    print(f"  train: {n_train:,}  val: {n_val_act:,}")
+    print(f"  labels — win: {wins/n_train*100:.1f}%  "
+          f"loss: {losses/n_train*100:.1f}%  "
+          f"mean: {float(pos_values.mean()):+.3f}")
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# CLI — standalone dataset builder
+# ---------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Generate endgame curriculum dataset for PetraNet training."
+    )
+    ap.add_argument("--positions",  type=int, default=10000,
+                    help="Number of base positions per stage (mirrors included automatically)")
+    ap.add_argument("--stages",     type=int, nargs="+", default=[1],
+                    help="Stages to mix: 1=KQK 2=KRK 3=KPK 4=KQvKR 5=KRvKP "
+                         "6=KBvKP 7=KNvKP 8=KPvKP (default: 1)")
+    ap.add_argument("--out",        required=True,
+                    help="Output .pt file path")
+    ap.add_argument("--no-mirrors", action="store_true",
+                    help="Skip antipodal mirror positions (not recommended)")
+    ap.add_argument("--stockfish",  default=None,
+                    help="Stockfish binary path for label verification (optional)")
+    ap.add_argument("--depth",      type=int, default=5,
+                    help="Stockfish depth for verification (default: 5)")
+    ap.add_argument("--seed",       type=int, default=42)
+    args = ap.parse_args()
+
+    random.seed(args.seed)
+    include_mirrors = not args.no_mirrors
+    stage_label = "+".join(STAGE_NAMES.get(s, f"stage{s}") for s in args.stages)
+
+    print(f"Generating {args.positions:,} × {stage_label}"
+          + (" + mirrors" if include_mirrors else "") + " ...")
+
+    positions = generate_positions(args.positions,
+                                   include_mirrors=include_mirrors,
+                                   stages=args.stages)
+    print(f"  Total positions: {len(positions):,}")
+
+    if args.stockfish:
+        positions = label_with_stockfish(positions, args.stockfish, args.depth)
+
+    print("\nBuilding dataset ...")
+    data = build_dataset(positions)
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    torch.save(data, args.out)
+    print(f"\nSaved → {args.out}")
+
+
+if __name__ == "__main__":
+    main()
