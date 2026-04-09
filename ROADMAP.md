@@ -327,6 +327,41 @@ To run after gate: `compare_geometry.py` with R6 vs R2/R4 on `selfplay_r1_full_s
 
 ---
 
+## Session 8 — Doover: Endgame Curriculum + SF Lichess (2026-04-09)
+
+### Endgame stage 1+2 result
+
+Trained from scratch (Tanh bottleneck) on 20k KQ vs K + KR vs K positions with antipodal mirrors, 20 epochs, value-only (policy weight=0), regenerating positions each epoch to prevent memorisation.
+
+**Geometry probe results:**
+
+| Metric | Result | vs R4 |
+|--------|--------|-------|
+| Centroid cosine | **-0.9999** | 0.869 → essentially perfect |
+| Separation gap | **1.9971** | 0.048 → theoretical max is 2.0 |
+| Effective rank | **1.0 / 128** | COLLAPSED — 1D |
+| KQ vs K (W2M) | ✓ +0.983 | ✓ |
+| KQ vs K (B2M) | ✓ -0.984 | ✓ |
+| Black queen up | ✓ -0.984 | ✗ (R6 failed) |
+| NN consistency | 1.000 | 0.902 |
+
+**Interpretation:** The geometry mechanism works — antipodal separation is achievable and the endgame curriculum forces it cleanly. However, the training signal is binary (one side always has the winning piece, no draws, no gradations) so the model learned a single win/loss axis. Effective rank 1.0/128 means 127 dimensions are unused. The centroid cosine and separation gap look perfect but are trivially so — two perfectly separated clusters with no internal variation.
+
+**Decision:** Skip the remaining endgame stages (3–8). They would expand rank from 1 to maybe 5 but the distribution is still too narrow. The correct next step is SF-labeled Lichess data with continuous labels — hundreds of material configurations simultaneously — mixed with endgame anchors (15%) to keep the win/loss axis grounded.
+
+### Doover architecture decisions confirmed
+- **Tanh bottleneck**: confirmed correct, antipodal geometry achievable
+- **ReLU value head**: leave as-is — passes antisymmetry with balanced training data
+- **GPU**: switching to `gpuv100` queue for training (24h wall limit)
+
+### Dataset pipeline (in progress 2026-04-09)
+- Lichess Jan 2025 PGN already on HPC (11GB)
+- `parse_lichess` job submitted — 150k games, min ELO 1500, `--no-strict` (Check 6 false positive due to STM-relative representation)
+- SF reeval job ready to submit after parse completes
+- Training job: SF dataset primary + 15% endgame stage 1+2 anchors
+
+---
+
 ## Milestones
 
 ### ELO
@@ -338,10 +373,10 @@ To run after gate: `compare_geometry.py` with R6 vs R2/R4 on `selfplay_r1_full_s
 
 ### Geometry (the thesis)
 - [x] Win/loss centroid cosine < 0.85 — *R4: 0.869*
-- [ ] Win/loss centroid cosine < 0.70 — *target for R6*
-- [ ] Separation gap > 0.10 — *currently 0.048–0.057*
-- [ ] KQ vs K AND K vs KQ both correct — *K vs KQ never correct, any round*
-- [ ] Dead dimensions < 5/128 — *currently 26/128*
+- [x] Win/loss centroid cosine < 0.00 — *Endgame stage 1+2: -0.9999*
+- [x] KQ vs K AND K vs KQ both correct — *Endgame stage 1+2: both ✓*
+- [ ] Effective rank > 30 — *currently 1.0/128 (endgame only)*
+- [ ] Separation gap > 0.10 with rank > 30 — *gap trivially 2.0 but rank collapsed*
 
 ### Self-play
 - [x] 1k self-play positions trained
