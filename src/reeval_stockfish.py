@@ -62,6 +62,7 @@ class Stockfish:
         self._wait_for("uciok")
         self._send("isready")
         self._wait_for("readyok")
+        self._send("setoption name Threads value 4")
 
     def _send(self, cmd: str):
         self._proc.stdin.write(cmd + "\n")
