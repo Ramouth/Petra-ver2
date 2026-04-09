@@ -496,6 +496,8 @@ def main():
     ap.add_argument("--validate-only", action="store_true",
                     help="Parse and validate but do not save")
     ap.add_argument("--seed",          type=int, default=42)
+    ap.add_argument("--no-strict",     action="store_true",
+                    help="Warn on validation failures instead of raising")
     args = ap.parse_args()
 
     positions = parse_pgn(
@@ -510,7 +512,7 @@ def main():
         print("No positions extracted. Check PGN path and filters.")
         sys.exit(1)
 
-    validate_dataset(positions, strict=True)
+    validate_dataset(positions, strict=not args.no_strict)
 
     if not args.validate_only:
         split_and_save(positions, args.out, seed=args.seed)
