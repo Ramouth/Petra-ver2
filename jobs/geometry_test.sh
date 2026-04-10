@@ -2,7 +2,7 @@
 #BSUB -J geometry_test
 #BSUB -q hpc
 #BSUB -n 1
-#BSUB -R "rusage[mem=2GB]"
+#BSUB -R "rusage[mem=4GB]"
 #BSUB -W 0:30
 #BSUB -o /zhome/81/b/206091/logs/geometry_test_%J.out
 #BSUB -e /zhome/81/b/206091/logs/geometry_test_%J.err

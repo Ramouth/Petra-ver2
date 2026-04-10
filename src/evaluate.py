@@ -143,7 +143,7 @@ def make_geometry_value_fn(model: PetraNet, dataset_path: str,
         proj = float(np.dot(g, axis)) + b
         return math.tanh(proj)
 
-    return geometry_value
+    return geometry_value, axis, b
 
 
 # ---------------------------------------------------------------------------
@@ -216,21 +216,31 @@ class MCTSAgent(Agent):
     """
 
     def __init__(self, model: PetraNet, n_simulations: int = 200,
-                 value: str = "learned", temperature_moves: int = 10):
+                 value: str = "learned", temperature_moves: int = 10,
+                 probe_axis: np.ndarray = None, probe_bias: float = 0.0):
         assert value in ("learned", "material", "zero", "geometry")
         if value == "material":
             value_fn = material_value
         elif value == "zero":
             value_fn = zero_value
         elif value == "geometry":
-            value_fn = make_geometry_value_fn(model)
+            if probe_axis is None:
+                raise ValueError("MCTSAgent(value='geometry') requires probe_axis. "
+                                 "Fit the probe via make_geometry_value_fn and pass axis/bias.")
+            axis = probe_axis
+            bias = probe_bias
+            value_fn = lambda board: math.tanh(
+                float(np.dot(_geo_vec(model, board), axis)) + bias
+            )
         else:
             value_fn = None   # MCTS defaults to model.value()
 
-        self._mcts      = MCTS(model, device, value_fn=value_fn)
-        self._n         = n_simulations
-        self._val       = value
+        self._mcts       = MCTS(model, device, value_fn=value_fn)
+        self._n          = n_simulations
+        self._val        = value
         self._temp_moves = temperature_moves
+        self._probe_axis = probe_axis
+        self._probe_bias = probe_bias
 
     def select_move(self, board: chess.Board) -> chess.Move:
         # Use temperature=1 for opening moves so repeated games diverge.
@@ -247,8 +257,12 @@ class MCTSAgent(Agent):
 
     @property
     def cfg(self):
-        return {"type": "mcts", "value": self._val, "n_sim": self._n,
-                "temp_moves": self._temp_moves}
+        d = {"type": "mcts", "value": self._val, "n_sim": self._n,
+             "temp_moves": self._temp_moves}
+        if self._val == "geometry":
+            d["probe_axis"] = self._probe_axis.tolist()
+            d["probe_bias"] = self._probe_bias
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +324,14 @@ def _game_worker(args):
         if t == "greedy":
             return GreedyAgent(model)
         if t == "mcts":
+            kwargs = {}
+            if cfg.get("value") == "geometry":
+                kwargs["probe_axis"] = np.array(cfg["probe_axis"])
+                kwargs["probe_bias"] = cfg["probe_bias"]
             return MCTSAgent(model, n_simulations=cfg["n_sim"],
                              value=cfg["value"],
-                             temperature_moves=cfg["temp_moves"])
+                             temperature_moves=cfg["temp_moves"],
+                             **kwargs)
         raise ValueError(f"Unknown agent type: {t}")
 
     a, b = _make(agent_a_cfg, model_a), _make(agent_b_cfg, model_b)
@@ -515,10 +534,10 @@ def run_ablation(model: Optional[PetraNet], n_games: int = 100,
             if not probe_dataset:
                 print("  SKIP: --probe-dataset required for step 6")
                 continue
-            geo_value_fn = make_geometry_value_fn(model, probe_dataset)
-            model.geometry_value_fn = geo_value_fn   # attach for worker access
+            _, axis, bias = make_geometry_value_fn(model, probe_dataset)
             a = MCTSAgent(model, n_simulations=n_sim, value="geometry",
-                          temperature_moves=temperature_moves)
+                          temperature_moves=temperature_moves,
+                          probe_axis=axis, probe_bias=bias)
             b = MCTSAgent(model, n_simulations=n_sim, value="material",
                           temperature_moves=temperature_moves)
 
