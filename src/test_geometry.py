@@ -2,9 +2,7 @@
 Geometry consistency tests for PetraNet.
 
 Tests structural properties the geometry should satisfy if it is encoding
-chess value correctly. These are model-only tests — no dataset required.
-Each test is pass/fail with a numeric score so results are comparable across
-model checkpoints.
+chess value correctly.
 
 Tests
 -----
@@ -14,10 +12,17 @@ Tests
   4. Forced mate convergence — as mate approaches, win projection increases
   5. Transposition consistency — same position via different move orders = same geometry
 
+Tests 1, 2, 4 project geometry onto a linear probe axis fitted on game outcomes
+from the original dataset.pt. The model may be trained on SF centipawns, so game
+outcomes are an orthogonal supervision signal — the probe is independent of the
+value head. R² on the val set measures how much game-outcome signal the geometry
+carries.
+
+Tests 3, 5 are purely structural — they require no dataset.
+
 Usage
 -----
-    python3 src/test_geometry.py --model models/zigzag/r4/best.pt
-    python3 src/test_geometry.py --model models/zigzag/r6/best.pt
+    python3 src/test_geometry.py --model models/best.pt --dataset data/dataset.pt
 """
 
 import argparse
@@ -47,46 +52,67 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
-def win_projection(g: np.ndarray, c_win: np.ndarray, c_loss: np.ndarray) -> float:
-    """Scalar projection of g onto the win/loss axis. Positive = toward win."""
-    axis = c_win - c_loss
-    axis = axis / (np.linalg.norm(axis) + 1e-8)
+def fit_outcome_probe(model: PetraNet, dataset_path: str,
+                      batch_size: int = 512) -> tuple:
+    """
+    Fit a linear probe predicting game outcomes from geometry vectors.
+
+    Uses the original dataset.pt (win/loss/draw labels), not the SF-reeval
+    dataset. Since the model was trained on SF centipawns, game outcomes are
+    an orthogonal supervision signal — the probe axis is independent of the
+    value head weights.
+
+    Returns (axis, bias, r2_train, r2_val).
+      axis     — L2-normalised weight vector of the probe (128-dim)
+      bias     — scalar intercept
+      r2_train — R² on train split
+      r2_val   — R² on val split
+    """
+    print(f"  Loading {dataset_path} ...")
+    data = torch.load(dataset_path, map_location="cpu", weights_only=False)
+
+    def _geoms_and_labels(split):
+        tensors = data[split]["tensors"]        # (N, 14, 8, 8)
+        values  = data[split]["values"].numpy() # (N,) game outcomes
+        geoms   = []
+        for i in range(0, len(tensors), batch_size):
+            batch = tensors[i:i+batch_size].float().to(device)
+            g = model.geometry(batch).cpu().numpy()
+            geoms.append(g)
+        return np.vstack(geoms), values
+
+    print("  Computing geometry vectors for train split ...")
+    X_train, y_train = _geoms_and_labels("train")
+    print("  Computing geometry vectors for val split ...")
+    X_val,   y_val   = _geoms_and_labels("val")
+
+    print(f"  Fitting ridge regression on {len(y_train):,} positions ...")
+    lam = 1e-3
+    XtX = X_train.T @ X_train + lam * np.eye(X_train.shape[1])
+    w   = np.linalg.solve(XtX, X_train.T @ y_train)
+    b   = float(y_train.mean() - (X_train.mean(axis=0) @ w))
+
+    def r2(X, y):
+        pred   = X @ w + b
+        ss_res = np.sum((y - pred) ** 2)
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        return 1.0 - ss_res / (ss_tot + 1e-8)
+
+    r2_train = r2(X_train, y_train)
+    r2_val   = r2(X_val,   y_val)
+
+    axis = w / (np.linalg.norm(w) + 1e-8)
+    return axis, b, r2_train, r2_val
+
+
+def probe_proj(g: np.ndarray, axis: np.ndarray) -> float:
+    """Scalar projection of a geometry vector onto the probe axis."""
     return float(np.dot(g, axis))
 
 
 def color_flip(board: chess.Board) -> chess.Board:
     """Return the board with colors swapped (mirror position)."""
     return board.mirror()
-
-
-def win_loss_centroids(model: PetraNet) -> tuple:
-    """
-    Compute win/loss centroids from a fixed set of unambiguous positions.
-
-    Includes both White-to-move and Black-to-move equivalents so the
-    centroid reflects STM-relative geometry, not White-biased geometry.
-    After board flipping, both should produce identical tensors — including
-    both makes the centroid more robust and implicitly tests the fix.
-    """
-    win_positions = [
-        chess.Board("4k3/8/8/8/8/8/8/4K2Q w - - 0 1"),  # white to move, white winning
-        chess.Board("4k2q/8/8/8/8/8/8/4K3 b - - 0 1"),   # black to move, black winning
-        chess.Board("4k3/8/8/2Q5/8/8/8/4K3 w - - 0 1"),  # queen on c5, white to move
-        chess.Board("4k2q/8/8/8/8/2Q5/8/4K3 b - - 0 1"), # black to move equivalent
-        chess.Board("8/8/8/8/3k4/8/8/3K2Q1 w - - 0 1"),  # queen on g1
-        chess.Board("8/3k4/8/8/8/8/8/3K2q1 b - - 0 1"),  # black to move equivalent
-    ]
-    loss_positions = [
-        chess.Board("4K3/8/8/8/8/8/8/4k2q w - - 0 1"),  # white to move, white losing
-        chess.Board("4K2Q/8/8/8/8/8/8/4k3 b - - 0 1"),   # black to move, black losing
-        chess.Board("4K3/8/8/2q5/8/8/8/4k3 w - - 0 1"),  # queen on c5, white losing
-        chess.Board("4K2Q/8/8/8/8/2q5/8/4k3 b - - 0 1"), # black to move equivalent
-        chess.Board("8/8/8/8/3K4/8/8/3k2q1 w - - 0 1"),  # queen on g1, white losing
-        chess.Board("8/3K4/8/8/8/8/8/3k2Q1 b - - 0 1"),  # black to move equivalent
-    ]
-    c_win  = np.mean([geo(model, b) for b in win_positions],  axis=0)
-    c_loss = np.mean([geo(model, b) for b in loss_positions], axis=0)
-    return c_win, c_loss
 
 
 PASS  = "✓ PASS"
@@ -98,10 +124,10 @@ WARN  = "~ WARN"
 # Test 1: Material monotonicity
 # ---------------------------------------------------------------------------
 
-def test_material_monotonicity(model: PetraNet, c_win: np.ndarray, c_loss: np.ndarray):
+def test_material_monotonicity(model: PetraNet, axis: np.ndarray):
     print("\n" + "="*60)
     print("TEST 1 — Material monotonicity")
-    print("  Adding stronger pieces should increase win projection.")
+    print("  Adding stronger pieces should increase outcome-probe projection.")
     print("="*60)
 
     base = chess.Board("4k3/8/8/8/8/8/8/4K3 w - - 0 1")  # bare kings
@@ -114,8 +140,8 @@ def test_material_monotonicity(model: PetraNet, c_win: np.ndarray, c_loss: np.nd
         (chess.QUEEN,  chess.WHITE, chess.D1, "White queen  (d1)"),
     ]
 
-    base_proj = win_projection(geo(model, base), c_win, c_loss)
-    print(f"\n  {'Position':<30}  {'win-proj':>8}  {'delta':>8}")
+    base_proj = probe_proj(geo(model, base), axis)
+    print(f"\n  {'Position':<30}  {'probe':>8}  {'delta':>8}")
     print(f"  {'-'*30}  {'--------':>8}  {'--------':>8}")
     print(f"  {'Bare kings (baseline)':<30}  {base_proj:>+8.4f}  {'':>8}")
 
@@ -123,12 +149,11 @@ def test_material_monotonicity(model: PetraNet, c_win: np.ndarray, c_loss: np.nd
     for piece_type, color, square, label in pieces:
         b = base.copy()
         b.set_piece_at(square, chess.Piece(piece_type, color))
-        p = win_projection(geo(model, b), c_win, c_loss)
+        p = probe_proj(geo(model, b), axis)
         delta = p - base_proj
         projections.append(p)
         print(f"  {label:<30}  {p:>+8.4f}  {delta:>+8.4f}")
 
-    # Check monotonically increasing
     passing = all(projections[i] < projections[i+1] for i in range(len(projections)-1))
     result = PASS if passing else FAIL
     print(f"\n  Result: {result}  (monotonically increasing: {passing})")
@@ -139,10 +164,10 @@ def test_material_monotonicity(model: PetraNet, c_win: np.ndarray, c_loss: np.nd
 # Test 2: Piece value ordering
 # ---------------------------------------------------------------------------
 
-def test_piece_value_ordering(model: PetraNet, c_win: np.ndarray, c_loss: np.ndarray):
+def test_piece_value_ordering(model: PetraNet, axis: np.ndarray):
     print("\n" + "="*60)
     print("TEST 2 — Piece value ordering")
-    print("  Geometry should respect Q > R > B ≈ N > P.")
+    print("  Outcome-probe projection should respect Q > R > B ≈ N > P.")
     print("="*60)
 
     base = chess.Board("4k3/8/8/8/8/8/8/4K3 w - - 0 1")
@@ -156,12 +181,12 @@ def test_piece_value_ordering(model: PetraNet, c_win: np.ndarray, c_loss: np.nda
     ]
 
     projs = {}
-    print(f"\n  {'Piece':<10}  {'win-proj':>8}")
+    print(f"\n  {'Piece':<10}  {'probe':>8}")
     print(f"  {'-'*10}  {'--------':>8}")
     for piece_type, color, square, label in piece_positions:
         b = base.copy()
         b.set_piece_at(square, chess.Piece(piece_type, color))
-        p = win_projection(geo(model, b), c_win, c_loss)
+        p = probe_proj(geo(model, b), axis)
         projs[label] = p
         print(f"  {label:<10}  {p:>+8.4f}")
 
@@ -233,14 +258,12 @@ def test_stm_symmetry(model: PetraNet):
 # Test 4: Forced mate convergence
 # ---------------------------------------------------------------------------
 
-def test_forced_mate_convergence(model: PetraNet, c_win: np.ndarray, c_loss: np.ndarray):
+def test_forced_mate_convergence(model: PetraNet, axis: np.ndarray):
     print("\n" + "="*60)
     print("TEST 4 — Forced mate convergence")
-    print("  As mate approaches (KQ vs K), win projection should increase.")
+    print("  As mate approaches (KQ vs K), outcome-probe projection should increase.")
     print("="*60)
 
-    # KQ vs K positions at decreasing distance from mate
-    # Roughly ordered from "queen just entered" to "mate in 1"
     positions = [
         ("Queen enters endgame",     chess.Board("8/8/8/8/4k3/8/8/Q3K3 w - - 0 1")),
         ("Queen closer",             chess.Board("8/8/8/4Q3/4k3/8/8/4K3 w - - 0 1")),
@@ -249,18 +272,16 @@ def test_forced_mate_convergence(model: PetraNet, c_win: np.ndarray, c_loss: np.
         ("Mate in 1",                chess.Board("7k/8/6KQ/8/8/8/8/8 w - - 0 1")),
     ]
 
-    print(f"\n  {'Position':<28}  {'win-proj':>8}  {'value':>7}")
+    print(f"\n  {'Position':<28}  {'probe':>8}  {'value':>7}")
     print(f"  {'-'*28}  {'--------':>8}  {'-------':>7}")
 
     projections = []
     for label, board in positions:
-        g = geo(model, board)
-        p = win_projection(g, c_win, c_loss)
+        p = probe_proj(geo(model, board), axis)
         v = model.value(board, device)
         projections.append(p)
         print(f"  {label:<28}  {p:>+8.4f}  {v:>+7.3f}")
 
-    # Check general upward trend (allow one non-monotone step)
     violations = sum(projections[i] >= projections[i+1] for i in range(len(projections)-1))
     passing = violations <= 1
     result = PASS if passing else (WARN if violations <= 2 else FAIL)
@@ -348,7 +369,9 @@ def print_summary(results: dict):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True, help="Path to model .pt")
+    ap.add_argument("--model",   required=True, help="Path to model .pt")
+    ap.add_argument("--dataset", required=True,
+                    help="Path to original dataset.pt with game outcome labels")
     args = ap.parse_args()
 
     model = PetraNet().to(device)
@@ -356,17 +379,16 @@ def main():
     model.eval()
     print(f"Loaded: {args.model}")
 
-    print("\nBuilding win/loss centroids from KQ vs K anchor positions ...")
-    c_win, c_loss = win_loss_centroids(model)
-    axis_cos = cosine_sim(c_win, c_loss)
-    print(f"  Win/loss centroid cosine similarity: {axis_cos:.4f}")
-    print(f"  (Lower = better separated. Target after clean training: < 0.5)")
+    print("\nFitting game-outcome linear probe on geometry vectors ...")
+    axis, bias, r2_train, r2_val = fit_outcome_probe(model, args.dataset)
+    print(f"  Probe R²  train={r2_train:.4f}  val={r2_val:.4f}")
+    print(f"  (R² > 0.1 suggests geometry carries meaningful game-outcome signal)")
 
     results = {}
-    results["Material monotonicity"]     = test_material_monotonicity(model, c_win, c_loss)
-    results["Piece value ordering"]      = test_piece_value_ordering(model, c_win, c_loss)
+    results["Material monotonicity"]     = test_material_monotonicity(model, axis)
+    results["Piece value ordering"]      = test_piece_value_ordering(model, axis)
     results["STM symmetry"]              = test_stm_symmetry(model)
-    results["Forced mate convergence"]   = test_forced_mate_convergence(model, c_win, c_loss)
+    results["Forced mate convergence"]   = test_forced_mate_convergence(model, axis)
     results["Transposition consistency"] = test_transposition_consistency(model)
 
     print_summary(results)

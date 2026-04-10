@@ -89,23 +89,6 @@ def zero_value(board: chess.Board) -> float:
 # Geometry value function
 # ---------------------------------------------------------------------------
 
-_GEOMETRY_ANCHORS_WIN = [
-    chess.Board("4k3/8/8/8/8/8/8/4K2Q w - - 0 1"),  # white to move, white winning
-    chess.Board("4k2q/8/8/8/8/8/8/4K3 b - - 0 1"),   # black to move, black winning
-    chess.Board("4k3/8/8/2Q5/8/8/8/4K3 w - - 0 1"),  # queen on c5, white to move
-    chess.Board("4k2q/8/8/8/8/2Q5/8/4K3 b - - 0 1"), # black to move equivalent
-    chess.Board("8/8/8/8/3k4/8/8/3K2Q1 w - - 0 1"),  # queen on g1
-    chess.Board("8/3k4/8/8/8/8/8/3K2q1 b - - 0 1"),  # black to move equivalent
-]
-_GEOMETRY_ANCHORS_LOSS = [
-    chess.Board("4K3/8/8/8/8/8/8/4k2q w - - 0 1"),  # white to move, white losing
-    chess.Board("4K2Q/8/8/8/8/8/8/4k3 b - - 0 1"),   # black to move, black losing
-    chess.Board("4K3/8/8/2q5/8/8/8/4k3 w - - 0 1"),  # queen on c5, white losing
-    chess.Board("4K2Q/8/8/8/8/2q5/8/4k3 b - - 0 1"), # black to move equivalent
-    chess.Board("8/8/8/8/3K4/8/8/3k2q1 w - - 0 1"),  # queen on g1, white losing
-    chess.Board("8/3K4/8/8/8/8/8/3k2Q1 b - - 0 1"),  # black to move equivalent
-]
-
 
 def _geo_vec(model: PetraNet, board: chess.Board) -> np.ndarray:
     dev = next(model.parameters()).device
@@ -113,22 +96,51 @@ def _geo_vec(model: PetraNet, board: chess.Board) -> np.ndarray:
     return model.geometry(t).cpu().numpy()[0]
 
 
-def make_geometry_value_fn(model: PetraNet) -> Callable:
+def make_geometry_value_fn(model: PetraNet, dataset_path: str,
+                           batch_size: int = 512) -> Callable:
     """
-    Build a value function that uses the geometry projection onto the
-    win/loss axis derived from KQ vs K anchor positions.
+    Build a value function using a linear probe fitted on game outcomes.
+
+    The probe is fitted on the original dataset.pt (win/loss/draw labels).
+    Since the model may be trained on SF centipawns, game outcomes are an
+    orthogonal supervision signal — the probe axis is independent of the
+    value head weights. Step 6 then answers: does geometry, probed for game
+    outcomes independently, beat material in ELO?
 
     Returns a callable: board -> float in roughly (-1, +1).
-    The geometry drives the evaluation — the value head is not used.
     """
-    c_win  = np.mean([_geo_vec(model, b) for b in _GEOMETRY_ANCHORS_WIN],  axis=0)
-    c_loss = np.mean([_geo_vec(model, b) for b in _GEOMETRY_ANCHORS_LOSS], axis=0)
-    axis   = c_win - c_loss
-    axis   = axis / (np.linalg.norm(axis) + 1e-8)
+    print("Step 6: fitting game-outcome probe on geometry vectors ...")
+    data = torch.load(dataset_path, map_location="cpu", weights_only=False)
+
+    def _geoms_and_labels(split):
+        tensors = data[split]["tensors"]
+        values  = data[split]["values"].numpy()
+        geoms   = []
+        for i in range(0, len(tensors), batch_size):
+            batch = tensors[i:i+batch_size].float().to(
+                next(model.parameters()).device)
+            g = model.geometry(batch).cpu().numpy()
+            geoms.append(g)
+        return np.vstack(geoms), values
+
+    X_train, y_train = _geoms_and_labels("train")
+    lam = 1e-3
+    XtX = X_train.T @ X_train + lam * np.eye(X_train.shape[1])
+    w   = np.linalg.solve(XtX, X_train.T @ y_train)
+    b   = float(y_train.mean() - (X_train.mean(axis=0) @ w))
+    axis = w / (np.linalg.norm(w) + 1e-8)
+
+    # Report R² on val
+    X_val, y_val = _geoms_and_labels("val")
+    pred   = X_val @ w + b
+    ss_res = np.sum((y_val - pred) ** 2)
+    ss_tot = np.sum((y_val - y_val.mean()) ** 2)
+    r2_val = 1.0 - ss_res / (ss_tot + 1e-8)
+    print(f"  Probe R² (val): {r2_val:.4f}")
 
     def geometry_value(board: chess.Board) -> float:
-        g = _geo_vec(model, board)
-        proj = float(np.dot(g, axis))
+        g    = _geo_vec(model, board)
+        proj = float(np.dot(g, axis)) + b
         return math.tanh(proj)
 
     return geometry_value
@@ -463,7 +475,8 @@ def run_ablation(model: Optional[PetraNet], n_games: int = 100,
                  baseline_model: Optional[PetraNet] = None,
                  baseline_model_path: str = None,
                  workers: int = 1,
-                 pgn_out: str = None):
+                 pgn_out: str = None,
+                 probe_dataset: str = None):
     """
     Run the full ablation ladder or a subset of steps.
     model may be None for step 1 only.
@@ -499,6 +512,11 @@ def run_ablation(model: Optional[PetraNet], n_games: int = 100,
                 b = MCTSAgent(model, n_simulations=n_sim, value="material",
                               temperature_moves=temperature_moves)
         elif step == 6:
+            if not probe_dataset:
+                print("  SKIP: --probe-dataset required for step 6")
+                continue
+            geo_value_fn = make_geometry_value_fn(model, probe_dataset)
+            model.geometry_value_fn = geo_value_fn   # attach for worker access
             a = MCTSAgent(model, n_simulations=n_sim, value="geometry",
                           temperature_moves=temperature_moves)
             b = MCTSAgent(model, n_simulations=n_sim, value="material",
@@ -567,6 +585,8 @@ def main():
                          "If omitted, step 5 uses the material baseline.")
     ap.add_argument("--pgn-out",        default=None,
                     help="Path to write PGN file with all games (optional).")
+    ap.add_argument("--probe-dataset",  default=None,
+                    help="Path to original dataset.pt (game outcomes) for step 6 geometry probe.")
     args = ap.parse_args()
 
     model = None
@@ -598,7 +618,8 @@ def main():
                  baseline_model=baseline_model,
                  baseline_model_path=args.baseline_model,
                  workers=args.workers,
-                 pgn_out=args.pgn_out)
+                 pgn_out=args.pgn_out,
+                 probe_dataset=args.probe_dataset)
 
     # Gate: if step 5 was run and failed, exit non-zero so zigzag.py stops
     if 5 in results and results[5]["win_rate"] <= 0.55:
