@@ -23,11 +23,12 @@ Usage
 -----
     python3 src/reeval_stockfish.py --dataset dataset.pt --out dataset_sf.pt
     python3 src/reeval_stockfish.py --dataset dataset.pt --out dataset_sf.pt \\
-        --depth 12 --n 200000 --stockfish /usr/games/stockfish
+        --depth 12 --n 200000 --stockfish /usr/games/stockfish --workers 32
 """
 
 import argparse
 import math
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -48,7 +49,7 @@ class Stockfish:
     Thread-unsafe — one instance per process.
     """
 
-    def __init__(self, path: str = "/usr/games/stockfish", depth: int = 10):
+    def __init__(self, path: str = "/usr/games/stockfish", depth: int = 10, threads: int = 1):
         self.depth = depth
         self._proc = subprocess.Popen(
             [path],
@@ -62,7 +63,7 @@ class Stockfish:
         self._wait_for("uciok")
         self._send("isready")
         self._wait_for("readyok")
-        self._send("setoption name Threads value 4")
+        self._send(f"setoption name Threads value {threads}")
 
     def _send(self, cmd: str):
         self._proc.stdin.write(cmd + "\n")
@@ -120,6 +121,24 @@ class Stockfish:
 
 
 # ---------------------------------------------------------------------------
+# Multiprocessing worker (one Stockfish instance per worker process)
+# ---------------------------------------------------------------------------
+
+_worker_sf = None
+
+def _init_worker(sf_path: str, depth: int):
+    global _worker_sf
+    _worker_sf = Stockfish(path=sf_path, depth=depth, threads=1)
+
+def _eval_one(args):
+    idx, fen = args
+    try:
+        return idx, _worker_sf.evaluate(fen)
+    except Exception:
+        return idx, 0.0
+
+
+# ---------------------------------------------------------------------------
 # Re-evaluation
 # ---------------------------------------------------------------------------
 
@@ -128,12 +147,13 @@ def reeval(dataset_path: str,
            stockfish_path: str = "/usr/games/stockfish",
            depth: int = 10,
            n: int = None,
-           seed: int = 42):
+           seed: int = 42,
+           workers: int = 1):
     """
     Load dataset, re-evaluate positions with Stockfish, save new dataset.
 
-    n: if set, subsample this many positions from train+val combined.
-       If None, re-evaluate the full dataset.
+    n:       if set, subsample this many positions from train+val combined.
+    workers: number of parallel Stockfish processes.
     """
     print(f"Loading {dataset_path} ...")
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
@@ -177,28 +197,28 @@ def reeval(dataset_path: str,
     else:
         n = total
 
-    print(f"\nStarting Stockfish (depth={depth}) ...")
-    sf = Stockfish(path=stockfish_path, depth=depth)
-    print(f"  Stockfish ready.")
+    print(f"\nStarting {workers} Stockfish worker(s) (depth={depth}) ...")
 
     new_values = torch.zeros(n, dtype=torch.float32)
     t0 = time.time()
     errors = 0
+    done = 0
 
-    for i, fen in enumerate(all_fens):
-        try:
-            new_values[i] = sf.evaluate(fen)
-        except Exception as e:
-            new_values[i] = 0.0
-            errors += 1
+    with multiprocessing.Pool(
+        processes=workers,
+        initializer=_init_worker,
+        initargs=(stockfish_path, depth),
+    ) as pool:
+        print(f"  Workers ready.")
+        for idx, val in pool.imap(_eval_one, enumerate(all_fens), chunksize=64):
+            new_values[idx] = val
+            done += 1
+            if done % 5000 == 0:
+                elapsed = time.time() - t0
+                rate    = done / elapsed
+                eta     = (n - done) / rate
+                print(f"  {done:>8,} / {n:,}  ({rate:.0f} pos/s)  ETA {eta/60:.0f} min")
 
-        if (i + 1) % 5000 == 0:
-            elapsed = time.time() - t0
-            rate    = (i + 1) / elapsed
-            eta     = (n - i - 1) / rate
-            print(f"  {i+1:>8,} / {n:,}  ({rate:.0f} pos/s)  ETA {eta/60:.0f} min")
-
-    sf.close()
     elapsed = time.time() - t0
     print(f"\nDone: {n:,} positions in {elapsed:.0f}s  ({n/elapsed:.0f} pos/s)")
     if errors:
@@ -271,6 +291,8 @@ def main():
     ap.add_argument("--n",          type=int, default=200_000,
                     help="Number of positions to evaluate (default 200k)")
     ap.add_argument("--seed",       type=int, default=42)
+    ap.add_argument("--workers",    type=int, default=1,
+                    help="Number of parallel Stockfish processes (default 1)")
     args = ap.parse_args()
 
     reeval(
@@ -280,6 +302,7 @@ def main():
         depth=args.depth,
         n=args.n,
         seed=args.seed,
+        workers=args.workers,
     )
 
 
