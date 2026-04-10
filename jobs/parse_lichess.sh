@@ -14,5 +14,4 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/data.py \
     --pgn /zhome/81/b/206091/Petra-ver2/data/lichess_db_standard_rated_2025-01.pgn.zst \
     --out /zhome/81/b/206091/Petra-ver2/data/dataset.pt \
     --max-games 150000 \
-    --min-elo 1500 \
-    --no-strict
+    --min-elo 1500

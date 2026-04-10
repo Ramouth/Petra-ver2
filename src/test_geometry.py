@@ -43,6 +43,20 @@ from config import device
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_existing_path(cli_value: str | None, candidates: list[str], label: str) -> str:
+    """Return the explicit CLI path or the first existing default candidate."""
+    if cli_value:
+        return cli_value
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    joined = ", ".join(candidates)
+    raise FileNotFoundError(
+        f"Could not resolve {label}. Pass --{label} explicitly or create one of: {joined}"
+    )
+
 def geo(model: PetraNet, board: chess.Board) -> np.ndarray:
     t = board_to_tensor(board).unsqueeze(0).float().to(device)
     return model.geometry(t).cpu().numpy()[0]
@@ -369,18 +383,35 @@ def print_summary(results: dict):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",   required=True, help="Path to model .pt")
-    ap.add_argument("--dataset", required=True,
-                    help="Path to original dataset.pt with game outcome labels")
+    ap.add_argument("--model",   default=None,
+                    help="Path to model .pt (defaults to models/best.pt if present)")
+    ap.add_argument("--dataset", default=None,
+                    help="Path to original dataset.pt with game outcome labels "
+                         "(defaults to data/dataset.pt if present)")
     args = ap.parse_args()
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        model_path = _resolve_existing_path(
+            args.model,
+            [os.path.join(repo_root, "models", "best.pt")],
+            "model",
+        )
+        dataset_path = _resolve_existing_path(
+            args.dataset,
+            [os.path.join(repo_root, "data", "dataset.pt")],
+            "dataset",
+        )
+    except FileNotFoundError as e:
+        ap.error(str(e))
+
     model = PetraNet().to(device)
-    model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
-    print(f"Loaded: {args.model}")
+    print(f"Loaded: {model_path}")
 
     print("\nFitting game-outcome linear probe on geometry vectors ...")
-    axis, bias, r2_train, r2_val = fit_outcome_probe(model, args.dataset)
+    axis, bias, r2_train, r2_val = fit_outcome_probe(model, dataset_path)
     print(f"  Probe R²  train={r2_train:.4f}  val={r2_val:.4f}")
     print(f"  (R² > 0.1 suggests geometry carries meaningful game-outcome signal)")
 

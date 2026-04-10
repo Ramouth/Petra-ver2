@@ -1,4 +1,134 @@
-# Petra — Phase 1 Roadmap
+# Petra — Geometry-Driven Engine Roadmap
+
+## Current Purpose
+
+Petra is no longer aiming merely to be a stronger value+policy engine with an
+interesting latent space. The purpose is now narrower and stricter:
+
+**Build a chess engine whose search can eventually be driven by geometry, not
+just a scalar value head.**
+
+That changes what counts as progress:
+
+- Better ELO is necessary but not sufficient
+- A clean win/loss axis is necessary but not sufficient
+- The bottleneck must develop **distributed, non-collapsed structure**
+- The data and training pipeline must be trustworthy under STM-relative encoding
+- The current training setup must be treated as **preparation for geometry-driven
+  search**, not as the final engine design
+
+## Immediate Goal
+
+Achieve the current doover run cleanly:
+
+1. Parse Lichess into a validated STM-relative dataset
+2. Re-label with Stockfish while preserving the original train/val boundary
+3. Train on broad SF-Lichess data mixed with 15% endgame anchors
+4. Probe geometry with **effective rank as the primary gate**
+
+The current run is successful only if it produces:
+
+- Effective rank `> 30`
+- A meaningful but non-collapsed win/loss axis
+- Correct sanity behaviour on basic asymmetric endgames
+- Validation metrics that are not polluted by train/val leakage
+
+Centroid cosine and separation gap are secondary diagnostics. They can look
+excellent in a degenerate 1D geometry, which is not the target.
+
+## What The Current Setup Is For
+
+The current codebase is **not yet a geometry-driven engine**. It is the
+foundation stage that must answer a simpler question first:
+
+> Can Petra learn a broad, stable, non-collapsed geometry from chess positions
+> that is rich enough to justify making geometry part of search?
+
+If the answer is no, geometry-driven MCTS is premature.
+If the answer is yes, the next phase is to make search depend on geometry
+directly rather than treating geometry as a byproduct of value training.
+
+## Execution Roadmap
+
+### Milestone A — Trustworthy Geometry Pretraining
+
+Purpose: produce a representation that is worth using in search.
+
+Requirements:
+- STM-relative board encoding everywhere
+- Strict dataset validation restored under STM-relative assumptions
+- SF re-evaluation preserves original train/val split
+- Endgame anchors are true antipodal partners
+- Anchor mixing preserves anchor policy targets instead of replacing them with
+  arbitrary one-hot labels
+
+Status:
+- Board flip / STM-relative move indexing: implemented
+- L2 bottleneck + thin value head: implemented
+- Probe uses effective rank: implemented
+- Parser validation repaired for STM-relative turn handling: implemented
+- GPU mixed-anchor training job: implemented
+
+### Milestone B — Broad Geometry Gate
+
+Run this exact path:
+
+```bash
+bsub < jobs/parse_lichess.sh
+bsub < jobs/reeval_sf.sh
+bsub < jobs/gen_endgame.sh
+bsub < jobs/train_sf_gpu.sh
+python3 src/probe_geometry.py --model models/sf_gpu/best.pt --dataset data/endgame_anchor.pt --n 5000
+```
+
+Gate:
+- Effective rank `> 30`
+- No obvious sign failures on asymmetric sanity positions
+- Probe shows broad usage of dimensions, not merely a perfect binary axis
+
+Interpretation:
+- If rank stays low, the setup is still learning a scalar disguised as geometry
+- If rank rises while retaining a clean win/loss axis, the representation stage
+  is greenlit
+
+### Milestone C — Make Geometry Part Of Search
+
+Only after Milestone B passes.
+
+Add geometry-dependent search terms:
+
+- Measure move-induced geometry deltas `g(s') - g(s)`
+- Test whether winning moves align with a learned directional structure
+- Add a geometry bonus to MCTS selection and compare against standard scalar MCTS
+- Evaluate whether geometry improves move quality beyond the value head alone
+
+This is the point where Petra becomes a candidate geometry-driven engine rather
+than a value engine with a well-monitored bottleneck.
+
+### Milestone D — Geometry-Driven Planning
+
+Longer-term, if geometry search signal is real:
+
+- Learn a transition model `f(g_t, move) -> g_{t+1}`
+- Evaluate move trajectories in geometry space
+- Use board state for legality and terminal truth, geometry for planning bias
+
+That is the actual engine thesis. Everything before it is infrastructure.
+
+## Current Critical Risks
+
+- The setup can still produce strong scalar value performance without geometry
+  becoming action-relevant
+- Effective rank can remain low even with good centroids and good sanity checks
+- Search currently uses scalar value only; geometry is still diagnostic
+- Endgame anchors help orient the space but do not by themselves make search
+  geometry-driven
+
+## Historical Archive
+
+The sections below are retained as project history. They describe how Petra
+reached the current doover, but they are no longer the authoritative statement
+of purpose or gating.
 
 ## Context
 

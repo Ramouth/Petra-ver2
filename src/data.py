@@ -87,6 +87,7 @@ class Position:
     move_idx: int           # move played from this position (from_sq*64 + to_sq)
     fen:      str           # for debugging and deduplication
     game_id:  int           # game index — used for train/val split
+    ply:      int           # half-move index within the game — used for validation ordering
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 continue
 
             sampled = rng.sample(candidates, min(MAX_POSITIONS_PER_GAME, len(candidates)))
-            yield games_parsed, result, [(pairs[i][0], pairs[i][1]) for i in sampled]
+            yield games_parsed, result, [(i, pairs[i][0], pairs[i][1]) for i in sampled]
 
             games_parsed += 1
 
@@ -188,6 +189,7 @@ def parse_pgn(pgn_path: str,
     move_idx_buf = np.empty(max_positions, dtype=np.int32)
     fens         = []
     game_ids     = []
+    plys         = []
 
     count = 0
     t0 = time.time()
@@ -195,12 +197,13 @@ def parse_pgn(pgn_path: str,
     for game_id, result, sampled_pairs in _iter_games(
             pgn_path, max_games, min_elo, require_normal_termination, rng):
 
-        for b, move in sampled_pairs:
+        for ply, b, move in sampled_pairs:
             tensor_buf[count]   = board_to_tensor(b).numpy().astype(np.uint8)
             value_buf[count]    = outcome_to_value(result, b.turn)
             move_idx_buf[count] = move_to_index(move, flip=(b.turn == chess.BLACK))
             fens.append(b.fen())
             game_ids.append(game_id)
+            plys.append(ply)
             count += 1
 
         if (game_id + 1) % 10_000 == 0:
@@ -218,6 +221,7 @@ def parse_pgn(pgn_path: str,
             move_idx=int(move_idx_buf[i]),
             fen=fens[i],
             game_id=game_ids[i],
+            ply=plys[i],
         )
         for i in range(count)
     ]
@@ -362,6 +366,7 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
 
     sign_inconsistencies = 0
     for gid, gpos in list(game_positions.items())[:100]:
+        gpos = sorted(gpos, key=lambda p: p.ply)
         for a, b in zip(gpos, gpos[1:]):
             if _label_class(a.value) == "draw" or _label_class(b.value) == "draw":
                 continue
