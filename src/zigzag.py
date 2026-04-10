@@ -84,10 +84,13 @@ def _run(cmd: list[str], dry_run: bool) -> int:
     return result.returncode
 
 
+_seed_model_override: str = None   # set by main() from --seed-model arg
+
+
 def _model_for_round(r: int) -> str:
     """Path to the best model from round r (0 = supervised seed)."""
     if r == 0:
-        return SEED_MODEL
+        return _seed_model_override or SEED_MODEL
     return os.path.join(MODELS_DIR, f"r{r}", "best.pt")
 
 
@@ -221,6 +224,7 @@ def run_round(r: int, n_sim: int, sf_depth: int, n_games: int, lr: float,
         "--dataset", selfplay_pt,
         "--out",     sf_pt,
         "--depth",   str(sf_depth),
+        "--workers", str(workers),
     ], dry_run)
     if rc != 0:
         print(f"  SF re-label failed (exit {rc}). Aborting round.")
@@ -300,6 +304,9 @@ def main():
                          "(default: 1). Use 3 for round 1 cold starts — essentially free "
                          "on multi-core HPC and converts initialisation variance into an "
                          "advantage. Subsequent rounds can use 1 (fine-tuning from prior round).")
+    ap.add_argument("--seed-model",  type=str, default=None,
+                    help="Path to round-0 seed model (default: models/sf/best.pt). "
+                         "Override when the supervised model is saved elsewhere.")
     ap.add_argument("--smoke",       action="store_true",
                     help="Smoke test: run round 1 at tiny scale to verify pipeline wiring. "
                          f"Uses {SMOKE_N_GAMES} games, n_sim={SMOKE_N_SIM}, "
@@ -307,6 +314,10 @@ def main():
                          f"{SMOKE_GATE_GAMES} gate games. "
                          "Run this locally before submitting any HPC job.")
     args = ap.parse_args()
+
+    global _seed_model_override
+    if args.seed_model:
+        _seed_model_override = args.seed_model
 
     # --smoke: override round 1 with minimal params, exit after one round.
     if args.smoke:
