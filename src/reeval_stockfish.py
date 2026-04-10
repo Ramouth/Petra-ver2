@@ -158,10 +158,13 @@ def reeval(dataset_path: str,
     print(f"Loading {dataset_path} ...")
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
 
-    # Merge train + val, then re-split at game level after re-evaluation
-    # (We re-split to ensure the SF dataset has a clean val set too.)
+    # Merge train + val for parallel evaluation, but track the boundary so
+    # the original split can be restored. This preserves game-level no-leakage:
+    # positions from the same game stay in the same split, so val loss is not
+    # optimistic due to positions from the same game appearing in both splits.
     train_d = data["train"]
     val_d   = data["val"]
+    n_train_orig = len(train_d["tensors"])
 
     all_tensors  = torch.cat([train_d["tensors"],  val_d["tensors"]],  dim=0)
     all_fens     = train_d["fens"] + val_d["fens"]
@@ -183,18 +186,19 @@ def reeval(dataset_path: str,
     total = len(all_fens)
     print(f"  Total positions: {total:,}")
 
-    # Subsample if requested
+    # Subsample if requested — sample within each split to preserve boundaries.
     if n is not None and n < total:
         import random
         rng = random.Random(seed)
-        idxs = sorted(rng.sample(range(total), n))
-        all_tensors = all_tensors[idxs]
-        all_fens    = [all_fens[i] for i in idxs]
-        all_moves   = all_moves[idxs]
+        sampled_idxs = sorted(rng.sample(range(total), n))
+        all_tensors = all_tensors[sampled_idxs]
+        all_fens    = [all_fens[i] for i in sampled_idxs]
+        all_moves   = all_moves[sampled_idxs]
         if all_visit_dists is not None:
-            all_visit_dists = all_visit_dists[idxs]
+            all_visit_dists = all_visit_dists[sampled_idxs]
         print(f"  Subsampled to {n:,} positions")
     else:
+        sampled_idxs = list(range(total))
         n = total
 
     print(f"\nStarting {workers} Stockfish worker(s) (depth={depth}) ...")
@@ -235,15 +239,16 @@ def reeval(dataset_path: str,
     print(f"  |v|>0.5 (decisive): {(np.abs(vals) > 0.5).mean()*100:.1f}%")
     print(f"  |v|<0.1 (equal):    {(np.abs(vals) < 0.1).mean()*100:.1f}%")
 
-    # Train / val split (80/20 by position index — no game-level info after merge)
-    import random
-    rng = random.Random(seed)
-    idxs = list(range(n))
-    rng.shuffle(idxs)
-    n_val   = max(1, int(n * 0.05))
-    val_idxs   = set(idxs[:n_val])
-    train_idxs = [i for i in range(n) if i not in val_idxs]
-    val_idxs   = list(val_idxs)
+    # Restore original train/val split by checking each position's source index.
+    # Positions with sampled_idxs[i] < n_train_orig came from the original train
+    # split; the rest came from val. This preserves game-level no-leakage.
+    train_idxs = [i for i, orig in enumerate(sampled_idxs) if orig < n_train_orig]
+    val_idxs   = [i for i, orig in enumerate(sampled_idxs) if orig >= n_train_orig]
+    if not val_idxs:
+        # Edge case: subsampling drew only train positions — take last 5% as val.
+        n_val      = max(1, len(train_idxs) // 20)
+        val_idxs   = train_idxs[-n_val:]
+        train_idxs = train_idxs[:-n_val]
 
     def pack(subset_idxs):
         d = {

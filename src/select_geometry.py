@@ -45,10 +45,16 @@ Usage
 
 Selection criteria (in order)
 ------------------------------
-1. Separation gap > 0.02   — primary (geometry is structured)
-2. Effective rank > 20     — secondary (geometry uses multiple dimensions)
+1. Effective rank > 20     — primary (geometry uses multiple dimensions)
+2. Separation gap > 0.02   — secondary (geometry is structured along an axis)
 3. Val loss                — tiebreaker
-If all candidates have gap < 0.02: warns and picks best available,
+
+Why rank before gap: a collapsed 1D geometry can have a perfect separation gap
+(all wins at one pole, all losses at the other) while effective rank = 1. That
+is a degenerate geometry — the MCTS value function collapses to a scalar. Rank
+ensures we select models with distributed geometry, not just a lucky axis.
+
+If all candidates have rank < 20: warns and picks best available,
 but signals that something may be architecturally wrong.
 """
 
@@ -136,10 +142,10 @@ def select_winner(results: list) -> dict:
         print("\nERROR: No valid probe results. Cannot select a winner.")
         sys.exit(1)
 
-    # Sort: higher separation_gap first, then higher effective_rank
+    # Sort: higher effective_rank first (prevents 1D collapse), then separation_gap.
     valid.sort(key=lambda r: (
-        r["separation_gap"] if r["separation_gap"] is not None else -999,
-        r["effective_rank"] if r["effective_rank"] is not None else 0,
+        r["effective_rank"]  if r["effective_rank"]  is not None else 0,
+        r["separation_gap"]  if r["separation_gap"]  is not None else -999,
     ), reverse=True)
 
     return valid[0]
@@ -164,14 +170,18 @@ def print_report(results: list, winner: dict):
         name = os.path.basename(os.path.dirname(r["model_path"]))
         print(f"  {name:<45}  {gap:>7}  {rank:>6}  {status}")
 
-    gap = winner["separation_gap"]
+    gap  = winner["separation_gap"]
+    rank = winner["effective_rank"]
     print(f"\n  Winner: {winner['model_path']}")
-    print(f"  Gap:    {gap:.4f}", end="")
+    print(f"  Rank:   {rank:.1f}  Gap: {gap:.4f}", end="")
 
-    if gap < 0.02:
-        print(f"\n\n  WARNING: Best gap ({gap:.4f}) < 0.02 — geometry may be flat.")
+    if rank is not None and rank < 20:
+        print(f"\n\n  WARNING: Best effective rank ({rank:.1f}) < 20 — geometry may be collapsed.")
         print(f"  Consider: different LR variants, more training epochs,")
         print(f"  or check that the doover architecture fixes are applied.")
+    elif gap < 0.02:
+        print(f"\n\n  WARNING: Best gap ({gap:.4f}) < 0.02 — geometry may be flat.")
+        print(f"  Consider: different LR variants, more training epochs.")
     elif gap < 0.05:
         print(f"  (weak — geometry forming but not strong)")
     elif gap < 0.10:

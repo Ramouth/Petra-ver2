@@ -314,8 +314,10 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     # ------------------------------------------------------------------
     # Check 4: side-to-move balance
     # ------------------------------------------------------------------
+    # STM encoding makes plane 12 always 1.0 for every position — it cannot
+    # be used to infer side to move. Parse the FEN directly instead.
     n_white_to_move = sum(
-        1 for p in positions if p.tensor[12].sum().item() == 64
+        1 for p in positions if chess.Board(p.fen).turn == chess.WHITE
     )
     n_black_to_move = n - n_white_to_move
     pct_white = 100 * n_white_to_move / n
@@ -363,9 +365,9 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
         for a, b in zip(gpos, gpos[1:]):
             if _label_class(a.value) == "draw" or _label_class(b.value) == "draw":
                 continue
-            # Side-to-move is encoded in plane 12 (all 1s = White to move)
-            a_white = a.tensor[12].sum().item() == 64
-            b_white = b.tensor[12].sum().item() == 64
+            # STM encoding makes plane 12 always 1.0 — use the FEN instead.
+            a_white = chess.Board(a.fen).turn == chess.WHITE
+            b_white = chess.Board(b.fen).turn == chess.WHITE
             if a_white == b_white:
                 # Same side to move → same label expected (both see win or both see loss)
                 if _label_class(a.value) != _label_class(b.value):

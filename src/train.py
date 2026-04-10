@@ -101,11 +101,17 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
     idx = torch.randperm(n_anchor)[:n_sample]
     a   = anchor["train"]
 
-    # Sample first, then build one-hot — avoids allocating n_anchor × 4096 × 4 bytes
-    # (at 200k anchor positions that's ~3GB just to sample a fraction)
-    a_sampled_idxs = a["move_idxs"][idx]
-    vd = torch.zeros(n_sample, 4096, dtype=torch.float32)
-    vd[torch.arange(n_sample), a_sampled_idxs] = 1.0
+    # Use anchor's precomputed visit_dists when available (e.g. endgame anchors
+    # have uniform distributions over legal moves — use them as-is).
+    # For supervised SF anchors (no visit_dists), build one-hot from move_idxs.
+    # This avoids injecting arbitrary one-hot policy targets into endgame positions
+    # where move_idxs is just the first legal move (meaningless for policy training).
+    if "visit_dists" in a:
+        vd = a["visit_dists"][idx]
+    else:
+        a_sampled_idxs = a["move_idxs"][idx]
+        vd = torch.zeros(n_sample, 4096, dtype=torch.float32)
+        vd[torch.arange(n_sample), a_sampled_idxs] = 1.0
 
     primary_vd = _ensure_visit_dists(primary_data["train"])
     mixed = {

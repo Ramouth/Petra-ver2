@@ -227,6 +227,31 @@ STAGE_NAMES = {
 # Position generation
 # ---------------------------------------------------------------------------
 
+def _color_swap(board: chess.Board) -> chess.Board:
+    """
+    Return the color-swapped antipodal partner of board.
+
+    Same piece types at the same squares, but all piece colors inverted.
+    Turn is preserved. This is the true antipodal partner under STM encoding:
+    - Original (white has winning piece, white to move) → label +1.0
+    - Swapped  (black has winning piece, white to move) → label -1.0
+
+    The spatial layout is identical, so the CNN sees the same board structure
+    but with pieces belonging to the opposite sides, forcing the geometry to
+    develop win/loss separation for this exact configuration.
+
+    Returns None if the swapped board is invalid (king in check, etc.).
+    """
+    swapped = chess.Board(fen=None)
+    swapped.clear()
+    for sq, piece in board.piece_map().items():
+        swapped.set_piece_at(sq, chess.Piece(piece.piece_type, not piece.color))
+    swapped.turn = board.turn
+    if not swapped.is_valid() or swapped.is_game_over():
+        return None
+    return swapped
+
+
 def generate_positions(n: int, include_mirrors: bool = True, stages=None):
     """
     Generate n endgame positions, mixed across one or more stages.
@@ -236,8 +261,9 @@ def generate_positions(n: int, include_mirrors: bool = True, stages=None):
       - Black to move  (label flipped vs W2M)
 
     If include_mirrors=True (default), each position is also paired with its
-    color-flipped mirror, giving up to 4 variants per sampled position.
-    Mirrors are antipodal partners — opposite label, opposite geometry.
+    color-swapped antipodal mirror, giving up to 4 variants per sampled position.
+    The mirror is the SAME position with piece colors inverted — a true antipodal
+    partner that forces win/loss geometric separation.
 
     Returns list of (board, value) tuples, shuffled.
     """
@@ -277,15 +303,16 @@ def generate_positions(n: int, include_mirrors: bool = True, stages=None):
                 all_positions.append((board_btm, -1.0))
 
             if include_mirrors:
-                # Mirror: black side has the winning piece
-                mirror = mirror_fn()
-                # White to move: black wins → -1.0
-                all_positions.append((mirror, -1.0))
-                # Black to move: black wins → +1.0
-                mirror_btm = mirror.copy()
-                mirror_btm.turn = chess.BLACK
-                if mirror_btm.is_valid() and not mirror_btm.is_game_over():
-                    all_positions.append((mirror_btm, +1.0))
+                # Color-swapped antipodal: same squares, piece colors inverted.
+                # White to move but white now has the bare king → white loses → -1.0
+                mirror = _color_swap(board)
+                if mirror is not None:
+                    all_positions.append((mirror, -1.0))
+                    # Black to move with the winning piece → STM (black) wins → +1.0
+                    mirror_btm = mirror.copy()
+                    mirror_btm.turn = chess.BLACK
+                    if mirror_btm.is_valid() and not mirror_btm.is_game_over():
+                        all_positions.append((mirror_btm, +1.0))
 
             generated += 1
 
