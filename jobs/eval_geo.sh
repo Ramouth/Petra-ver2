@@ -15,4 +15,5 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
     --step 6 \
     --games 100 \
     --workers 16 \
-    --probe-dataset /zhome/81/b/206091/Petra-ver2/data/dataset.pt
+    --probe-dataset /zhome/81/b/206091/Petra-ver2/data/dataset.pt \
+    --pgn-out /zhome/81/b/206091/Petra-ver2/data/eval_geo.pgn
