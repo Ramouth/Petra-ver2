@@ -1,7 +1,7 @@
 #!/bin/bash
 #BSUB -J reeval_sf
 #BSUB -q hpc
-#BSUB -n 32
+#BSUB -n 16
 #BSUB -R "rusage[mem=1GB]"
 #BSUB -W 6:00
 #BSUB -o /zhome/81/b/206091/logs/reeval_sf_%J.out
@@ -16,4 +16,4 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/reeval_stockfish.py \
     --stockfish /zhome/81/b/206091/bin/stockfish \
     --depth 15 \
     --n 200000 \
-    --workers 32
+    --workers 16
