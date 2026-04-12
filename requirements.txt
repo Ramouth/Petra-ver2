@@ -1,0 +1,6 @@
+numpy
+python-chess
+zstandard
+torch
+ripser
+persim
