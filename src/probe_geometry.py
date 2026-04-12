@@ -145,6 +145,10 @@ def check_label_separation(vecs: np.ndarray, values: np.ndarray):
 
     print(f"  Samples — win: {len(win_vecs)}, draw: {len(draw_vecs)}, loss: {len(loss_vecs)}")
 
+    if len(win_vecs) == 0 or len(loss_vecs) == 0:
+        print("  SKIPPED — insufficient win/loss samples for separation check")
+        return
+
     # Centroids
     c_win  = win_vecs.mean(axis=0)
     c_loss = loss_vecs.mean(axis=0)

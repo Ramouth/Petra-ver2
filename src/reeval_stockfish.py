@@ -133,9 +133,9 @@ def _init_worker(sf_path: str, depth: int):
 def _eval_one(args):
     idx, fen = args
     try:
-        return idx, _worker_sf.evaluate(fen)
+        return idx, _worker_sf.evaluate(fen), False
     except Exception:
-        return idx, 0.0
+        return idx, 0.0, True
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +214,10 @@ def reeval(dataset_path: str,
         initargs=(stockfish_path, depth),
     ) as pool:
         print(f"  Workers ready.")
-        for idx, val in pool.imap(_eval_one, enumerate(all_fens), chunksize=64):
+        for idx, val, err in pool.imap(_eval_one, enumerate(all_fens), chunksize=64):
             new_values[idx] = val
+            if err:
+                errors += 1
             done += 1
             if done % 5000 == 0:
                 elapsed = time.time() - t0
