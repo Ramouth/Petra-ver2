@@ -16,4 +16,6 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/reeval_stockfish.py \
     --stockfish /zhome/81/b/206091/bin/stockfish \
     --depth 15 \
     --n 200000 \
-    --workers 16
+    --workers 16 \
+    --min-decisive 0.3 \
+    --max-pieces 20

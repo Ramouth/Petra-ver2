@@ -148,12 +148,19 @@ def reeval(dataset_path: str,
            depth: int = 10,
            n: int = None,
            seed: int = 42,
-           workers: int = 1):
+           workers: int = 1,
+           min_decisive: float = 0.0,
+           max_pieces: int = 32):
     """
     Load dataset, re-evaluate positions with Stockfish, save new dataset.
 
-    n:       if set, subsample this many positions from train+val combined.
-    workers: number of parallel Stockfish processes.
+    n:             if set, subsample this many positions from train+val combined.
+    workers:       number of parallel Stockfish processes.
+    min_decisive:  keep only positions where |tanh(eval)| >= this value.
+                   0.0 = keep all. 0.3 ≈ 130cp advantage.
+    max_pieces:    keep only positions with at most this many pieces on the board.
+                   32 = keep all. 16 = endgame-like. 24 = simplified middlegame.
+                   Filters out tactically complex positions a baby model can't learn from.
     """
     print(f"Loading {dataset_path} ...")
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
@@ -231,8 +238,8 @@ def reeval(dataset_path: str,
         print(f"WARNING: {errors} evaluation errors (set to 0.0)")
 
     # Report label distribution
-    vals = new_values.numpy()
     import numpy as np
+    vals = new_values.numpy()
     print(f"\nLabel statistics (SF evals, tanh-squashed):")
     print(f"  Mean:   {vals.mean():.4f}")
     print(f"  Std:    {vals.std():.4f}")
@@ -240,6 +247,59 @@ def reeval(dataset_path: str,
     print(f"  Max:    {vals.max():.4f}")
     print(f"  |v|>0.5 (decisive): {(np.abs(vals) > 0.5).mean()*100:.1f}%")
     print(f"  |v|<0.1 (equal):    {(np.abs(vals) < 0.1).mean()*100:.1f}%")
+
+    # ---------------------------------------------------------------------------
+    # Filter: decisive + structurally simple
+    #
+    # Two criteria (both must pass):
+    #   1. |eval| >= min_decisive  — the position is actually winning/losing
+    #   2. piece_count <= max_pieces — the advantage is visible on the board,
+    #      not hidden in deep tactics. Fewer pieces = endgame-like = learnable.
+    #
+    # A forced mate-in-15 through a tactical combination scores 1.0 but looks
+    # like a normal middlegame to a baby model — it's noise, not signal.
+    # A queen-up position with 8 pieces left is immediately learnable.
+    # ---------------------------------------------------------------------------
+    if min_decisive > 0.0 or max_pieces < 32:
+        import chess
+        keep = []
+        skipped_eval = skipped_pieces = 0
+        for i, fen in enumerate(all_fens):
+            v = float(new_values[i])
+            if abs(v) < min_decisive:
+                skipped_eval += 1
+                continue
+            board = chess.Board(fen)
+            pc = bin(int(board.occupied)).count("1")
+            if pc > max_pieces:
+                skipped_pieces += 1
+                continue
+            keep.append(i)
+
+        print(f"\nFilter applied:")
+        print(f"  min_decisive={min_decisive}  max_pieces={max_pieces}")
+        print(f"  Kept:            {len(keep):,} / {n:,}")
+        print(f"  Dropped (eval):  {skipped_eval:,}")
+        print(f"  Dropped (pieces):{skipped_pieces:,}")
+
+        if len(keep) < 100:
+            raise ValueError(
+                f"Filter too aggressive — only {len(keep)} positions remain. "
+                f"Lower min_decisive or raise max_pieces."
+            )
+
+        keep_t         = torch.tensor(keep, dtype=torch.long)
+        new_values     = new_values[keep_t]
+        all_tensors    = all_tensors[keep_t]
+        all_moves      = all_moves[keep_t]
+        all_fens       = [all_fens[i] for i in keep]
+        sampled_idxs   = [sampled_idxs[i] for i in keep]
+        if all_visit_dists is not None:
+            all_visit_dists = all_visit_dists[keep_t]
+
+        filtered_vals = new_values.numpy()
+        print(f"  Post-filter decisive rate: "
+              f"{(np.abs(filtered_vals) > 0.5).mean()*100:.1f}%")
 
     # Restore original train/val split by checking each position's source index.
     # Positions with sampled_idxs[i] < n_train_orig came from the original train
@@ -297,9 +357,15 @@ def main():
     ap.add_argument("--depth",      type=int, default=10,            help="Search depth")
     ap.add_argument("--n",          type=int, default=200_000,
                     help="Number of positions to evaluate (default 200k)")
-    ap.add_argument("--seed",       type=int, default=42)
-    ap.add_argument("--workers",    type=int, default=1,
+    ap.add_argument("--seed",          type=int,   default=42)
+    ap.add_argument("--workers",       type=int,   default=1,
                     help="Number of parallel Stockfish processes (default 1)")
+    ap.add_argument("--min-decisive",  type=float, default=0.0,
+                    help="Keep only positions with |tanh(eval)| >= this. "
+                         "0.3 ≈ 130cp. 0.0 = keep all (default).")
+    ap.add_argument("--max-pieces",    type=int,   default=32,
+                    help="Keep only positions with <= this many pieces. "
+                         "32 = all, 24 = simplified middlegame, 16 = endgame (default: 32).")
     args = ap.parse_args()
 
     reeval(
@@ -310,6 +376,8 @@ def main():
         n=args.n,
         seed=args.seed,
         workers=args.workers,
+        min_decisive=args.min_decisive,
+        max_pieces=args.max_pieces,
     )
 
 
