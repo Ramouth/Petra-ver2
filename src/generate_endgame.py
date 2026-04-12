@@ -384,10 +384,12 @@ def build_dataset(positions, val_frac: float = 0.1):
         values      = []
         move_idxs   = []
         visit_dists = []
+        fens        = []
 
         for board, value in split:
             tensors.append(board_to_tensor(board))
             values.append(value)
+            fens.append(board.fen())
 
             # Uniform policy over legal moves in STM-relative coordinates
             flip  = (board.turn == chess.BLACK)
@@ -407,6 +409,7 @@ def build_dataset(positions, val_frac: float = 0.1):
             "values":      torch.tensor(values, dtype=torch.float32),
             "move_idxs":   torch.tensor(move_idxs, dtype=torch.int64),
             "visit_dists": torch.stack(visit_dists),
+            "fens":        fens,
         }
 
     n_train    = len(data["train"]["tensors"])
