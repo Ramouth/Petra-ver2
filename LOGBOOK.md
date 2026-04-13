@@ -180,7 +180,15 @@ However, the 67% step 5 result challenges a strong degeneracy claim — if the p
 ---
 
 ## Next Steps
-1. `bsub < jobs/probe_geometry.sh` — baseline geometry probe on `sf_gpu/best.pt`
-2. `bsub < jobs/zigzag_r1.sh` — round 1: self-play (n_sim=40, SF depth 12, 500 games)
-   - Opening book generated at runtime to avoid OOD opening bias
-3. `bsub < jobs/probe_geometry_r1.sh` — compare geometry vs baseline
+
+### Currently running
+- **Job 28200562** `reeval_balanced` — SF depth 15 re-evaluation of January 2020 Lichess data (`dataset_jan.pt`), min_decisive=0.05, max_pieces=32. ETA ~11:00 Apr 14. Produces `dataset_balanced.pt`.
+
+### After reeval finishes
+1. `bsub < jobs/train_balanced_gpu.sh` — merge `dataset_sf.pt` (March 2020, decisive) + `dataset_balanced.pt` (January 2020, balanced) + endgame anchor. Weight decay 5e-4. Output: `models/sf_balanced/best.pt`
+2. Geometry probe on `sf_balanced/best.pt` — check if effective rank improves from 3.7
+3. Update `zigzag_r1.sh` seed model to `models/sf_balanced/best.pt`
+4. `bsub < jobs/zigzag_r1.sh` — round 1 self-play with opening book
+
+### Why the extra training run
+`sf_gpu/best.pt` has effective rank 3.7/128 — almost pure win/loss axis, no draw concept, opening positions OOD (trained on max_pieces=20 only). `dataset_balanced.pt` adds full-board positions and balanced labels to fill the geometry gap before self-play.
