@@ -26,7 +26,7 @@ module load gcc/13.4.0-binutils-2.44
 # Output is mixed with dataset_sf.pt in train_balanced_gpu.sh.
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/reeval_stockfish.py \
-    --dataset /zhome/81/b/206091/Petra-ver2/data/dataset.pt \
+    --dataset /zhome/81/b/206091/Petra-ver2/data/dataset_jan.pt \
     --out     /zhome/81/b/206091/Petra-ver2/data/dataset_balanced.pt \
     --stockfish /zhome/81/b/206091/bin/stockfish \
     --depth 15 \
