@@ -35,7 +35,7 @@ module load gcc/13.4.0-binutils-2.44
 python3 -u /zhome/81/b/206091/Petra-ver2/src/zigzag.py \
     --rounds      1 \
     --workers     16 \
-    --seed-model  /zhome/81/b/206091/Petra-ver2/models/best.pt \
+    --seed-model  /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
     --sf-anchor   /zhome/81/b/206091/Petra-ver2/data/endgame_anchor.pt \
     --anchor-frac 0.20 \
     --n-seeds     3
