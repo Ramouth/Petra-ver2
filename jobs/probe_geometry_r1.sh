@@ -9,6 +9,7 @@
 
 source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
+module load cuda/12.1
 
 # Post-round 1 geometry probe. Run after zigzag_r1.sh completes.
 # Compare output against the baseline from probe_geometry.sh.

@@ -9,6 +9,7 @@
 
 source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
+module load cuda/12.1
 
 # Baseline geometry health check on the supervised SF model.
 # Run this before zigzag round 1 to get baseline numbers:
@@ -20,6 +21,6 @@ module load gcc/13.4.0-binutils-2.44
 # If separation gap does not improve after round 2, consider endgame anchoring.
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/probe_geometry.py \
-    --model   /zhome/81/b/206091/Petra-ver2/models/best.pt \
+    --model   /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
     --dataset /zhome/81/b/206091/Petra-ver2/data/dataset_sf.pt \
     --n 5000
