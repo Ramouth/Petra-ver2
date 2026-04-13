@@ -81,6 +81,43 @@ def _ensure_visit_dists(d: dict) -> torch.Tensor:
     return vd
 
 
+def merge_datasets(primary_data: dict, extra_path: str) -> dict:
+    """
+    Merge a second full dataset into the primary for training.
+
+    Both train AND val splits are merged so early stopping monitors loss
+    on both distributions — if the model memorises primary positions, the
+    extra val loss will catch it.
+
+    Use this to combine datasets from different Lichess months (different
+    position distributions) rather than mix_anchor which is for small
+    anchor fractions.
+    """
+    print(f"\nMerging extra dataset: {extra_path}")
+    extra = torch.load(extra_path, map_location="cpu", weights_only=False)
+
+    def _cat_split(a: dict, b: dict) -> dict:
+        merged = {
+            "tensors":   torch.cat([a["tensors"],   b["tensors"]]),
+            "values":    torch.cat([a["values"],     b["values"]]),
+            "move_idxs": torch.cat([a["move_idxs"],  b["move_idxs"]]),
+            "visit_dists": torch.cat([_ensure_visit_dists(a),
+                                      _ensure_visit_dists(b)]),
+        }
+        # Shuffle so batches contain positions from both datasets
+        perm = torch.randperm(len(merged["tensors"]))
+        return {k: v[perm] for k, v in merged.items()}
+
+    result = dict(primary_data)
+    result["train"] = _cat_split(primary_data["train"], extra["train"])
+    result["val"]   = _cat_split(primary_data["val"],   extra["val"])
+
+    n_train = len(result["train"]["tensors"])
+    n_val   = len(result["val"]["tensors"])
+    print(f"  Merged train: {n_train:,}  val: {n_val:,}")
+    return result
+
+
 def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict:
     """
     Mix a fraction of anchor (supervised SF) positions into the primary training split.
@@ -208,11 +245,13 @@ def train(dataset_path: str = None,
           epochs: int = 15,
           batch_size: int = 512,
           lr: float = 1e-3,
+          weight_decay: float = 1e-4,
           patience: int = 5,
           tight_patience: int = 3,
           transition_drop: float = 0.5,
           seed: int = 42,
           init_model: str = None,
+          extra_dataset: str = None,
           anchor_dataset: str = None,
           anchor_frac: float = 0.15,
           policy_weight: float = 1.0,
@@ -245,6 +284,8 @@ def train(dataset_path: str = None,
         if dataset_path is None:
             raise ValueError("--dataset is required unless --endgame-positions > 0")
         _, data, dense_policy = load_dataset(dataset_path)
+        if extra_dataset:
+            data = merge_datasets(data, extra_dataset)
         if anchor_dataset:
             data = mix_anchor(data, anchor_dataset, anchor_frac)
 
@@ -266,7 +307,7 @@ def train(dataset_path: str = None,
     n_params = sum(p.numel() for p in model.parameters())
     print(f"PetraNet: {n_params:,} parameters  |  device: {device}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=2, factor=0.5, min_lr=1e-5
         # patience=2: LR halves after 2 epochs no improvement
@@ -393,7 +434,12 @@ def main():
     ap.add_argument("--out",         default="models")
     ap.add_argument("--epochs",      type=int,   default=15)
     ap.add_argument("--batch-size",  type=int,   default=512)
-    ap.add_argument("--lr",          type=float, default=1e-3)
+    ap.add_argument("--lr",           type=float, default=1e-3)
+    ap.add_argument("--weight-decay", type=float, default=1e-4,
+                    help="L2 regularisation (default: 1e-4). Increase to 5e-4 when merging datasets.")
+    ap.add_argument("--extra-dataset", default=None,
+                    help="Second dataset to merge into train+val before training. "
+                         "Use for combining different Lichess months.")
     ap.add_argument("--patience",    type=int,   default=5)
     ap.add_argument("--tight-patience", type=int, default=3,
                     help="Patience after phase transition detected (default: 3)")
@@ -424,6 +470,8 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        weight_decay=args.weight_decay,
+        extra_dataset=args.extra_dataset,
         patience=args.patience,
         tight_patience=args.tight_patience,
         transition_drop=args.transition_drop,

@@ -64,6 +64,103 @@
 
 ---
 
+## Geometry Probe — Baseline (2026-04-13, Job 28199994)
+*Before zigzag round 1. Model: `sf_gpu/best.pt`. Dataset: `dataset_sf.pt`, n=5000.*
+
+| Metric | Value | R4 historical | Notes |
+|--------|-------|---------------|-------|
+| Effective rank | **3.7 / 128** | ~102 active dims (26 dead) | Far below healthy target of >30 — almost pure win/loss axis |
+| Win·Loss centroid cosine | **0.6665** | 0.869 | Much better separation than R4 |
+| Separation gap | **0.2427** | 0.048 | 5× better than R4 — geometry is genuinely structured |
+| NN label consistency | **0.808** (lift +0.375) | — | Nearby positions share labels reliably |
+| Win·Draw cosine | 0.8413 | — | |
+| Loss·Draw cosine | 0.9368 | — | Draws cluster near losses — model has weak draw concept |
+
+**Raw output:**
+```
+============================================================
+CHECK 1 — Eigenvalue distribution
+============================================================
+  Top-1  eigenvalue: 43.8% of variance
+  Top-5  eigenvalues: 89.8% of variance
+  Top-10 eigenvalues: 98.0% of variance
+  Effective rank: 3.7 / 128  (healthy > 30, collapsed < 10)
+  PARTIAL — some concentration but not collapsed
+
+CHECK 2 — Win / draw / loss separation
+  Samples — win: 1078, draw: 173, loss: 896
+  Centroid cosine similarities:
+    win  · loss  = 0.6665
+    win  · draw  = 0.8413
+    loss · draw  = 0.9368
+  Within-class cosine similarity:
+    win  pairs: 0.6244
+    loss pairs: 0.7477
+  Between-class (win vs loss): 0.4434
+  Separation gap: 0.2427
+  GOOD — win/loss positions occupy distinct regions
+
+CHECK 3 — Known position probes
+  Starting position              →win 0.666  →loss 0.814  value -0.168  → loss
+  KQ vs K — White to move        →win 0.760  →loss 0.469  value +0.905  → win
+  KQ vs K — Black to move        →win 0.491  →loss 0.947  value -0.899  → loss
+  Equal endgame (KR vs KR)       →win 0.780  →loss 0.450  value +0.928  → win  ← WRONG
+  White queen up                 →win 0.711  →loss 0.408  value +0.912  → win
+  Black queen up                 →win 0.051  →loss 0.305  value -0.905  → loss
+  Complex middlegame             →win 0.623  →loss 0.887  value -0.580  → loss
+
+CHECK 4 — Nearest-neighbour label consistency
+  Mean NN label match rate : 0.808
+  Random baseline          : 0.433
+  Lift                     : +0.375
+  GOOD — nearest neighbours share labels more than chance
+```
+
+**Interpretation:** Strong win/loss separation but geometry is effectively 1-dimensional. The model knows who's winning but has no middle ground. Root cause: 92.3% decisive training data — model has almost never seen a balanced position. KR vs KR equal endgame scored +0.928 (should be ~0) confirms no draw understanding.
+
+---
+
+## Evaluation vs Material (2026-04-13, Job 28200021)
+*Model: `sf_gpu/best.pt`. 100 games per step, n_sim=200, 16 workers.*
+
+| Step | Matchup | W | D | L | Win rate | ELO Δ | Result |
+|------|---------|---|---|---|----------|-------|--------|
+| 2 | Greedy(policy) vs Random | 0 | 50 | 50 | 25.0% | -191 | FAIL |
+| 5 | MCTS(learned) vs MCTS(material) | 58 | 18 | 24 | 67.0% | +123 | **PASS** |
+| 6 | MCTS(geometry) vs MCTS(material) | — | — | — | — | — | SKIP (--probe-dataset missing) |
+
+**Raw output:**
+```
+--- Step 2: Policy check (Greedy vs Random) ---
+  Games : 100  (W=0 D=50 L=50)
+  Score : 25.0/100  (25.0%)
+  ELO Δ : -191  (95% CI: [17.5%, 34.3%])
+  Step 2 [FAIL]  Policy check  wr=25.0%  ELO Δ=-191
+
+--- Step 5: Learned value (gate) (MCTS(learned) vs MCTS(material)) ---
+  Games : 100  (W=58 D=18 L=24)
+  Score : 67.0/100  (67.0%)
+  ELO Δ : +123  (95% CI: [57.3%, 75.4%])
+  Step 5 [PASS]  Learned value (gate)  wr=67.0%  ELO Δ=+123
+  GATE PASSED — learned value beats material. Proceed to self-play.
+
+--- Step 6: Geometry value ---
+  SKIP: --probe-dataset required for step 6
+```
+
+**Step 5 gate passed** — 67% exceeds the 55% threshold. Proceed to self-play.
+
+**Step 2 failure — policy concern (open question):**
+The perfectly regular W=0 D=50 L=50 result (every 10-game checkpoint: exactly W=0, D=5n, L=5n) is anomalous. One hypothesis: the policy is degenerate and always picks the same move, causing repetition draws as white and systematic losses as black. Supporting evidence: policy top-1 accuracy was only 0.022 in training.
+
+However, the 67% step 5 result challenges a strong degeneracy claim — if the policy were truly broken, MCTS would waste simulations on one branch and performance would suffer. More likely the policy is just very weak but not pathologically degenerate, and the value head (separation gap 0.2427) is primarily carrying the +123 ELO advantage.
+
+**Concern for zigzag:** A weak policy prior in MCTS could reduce self-play diversity — search concentrating on narrow lines → correlated training data → potential passenger problem. Severity unclear. Decision deferred until `reeval_balanced` completes and the next training run can be evaluated. Model saved at `sf_gpu/best.pt` so any round 1 outcome is recoverable.
+
+*Step 6 fix needed: add `--probe-dataset` to `eval_sf.sh` before next run.*
+
+---
+
 ## Comparison to Previous Rounds
 
 | Run | Dataset | Train size | Best V-R² | Black up queen | Start value | Notes |

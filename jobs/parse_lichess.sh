@@ -11,7 +11,7 @@ source /zhome/81/b/206091/petra-env/bin/activate
 pip install zstandard --quiet
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/data.py \
-    --pgn /zhome/81/b/206091/Petra-ver2/data/lichess_db_standard_rated_2020-03.pgn.zst \
-    --out /zhome/81/b/206091/Petra-ver2/data/dataset.pt \
+    --pgn /zhome/81/b/206091/Petra-ver2/data/lichess_db_standard_rated_2020-01.pgn.zst \
+    --out /zhome/81/b/206091/Petra-ver2/data/dataset_jan.pt \
     --max-games 150000 \
     --min-elo 1500
