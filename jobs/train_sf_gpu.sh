@@ -13,7 +13,7 @@ echo "Activating virtualenv..."
 source /zhome/81/b/206091/petra-env/bin/activate
 echo "Python: $(which python3)"
 module load gcc/13.4.0-binutils-2.44
-module load cuda/11.8
+module load cuda/12.1
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 python3 -c "import torch; print('torch:', torch.__version__, '| CUDA:', torch.cuda.is_available())"
 
