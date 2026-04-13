@@ -9,21 +9,22 @@
 
 source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
+module load cuda/12.1
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
-    --model /zhome/81/b/206091/Petra-ver2/models/best.pt \
+    --model /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
     --games 100 \
     --step 2 \
     --workers 16
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
-    --model /zhome/81/b/206091/Petra-ver2/models/best.pt \
+    --model /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
     --games 100 \
     --step 5 \
     --workers 16
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
-    --model /zhome/81/b/206091/Petra-ver2/models/best.pt \
+    --model /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
     --games 100 \
     --step 6 \
     --workers 16
