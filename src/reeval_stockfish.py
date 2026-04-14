@@ -35,6 +35,7 @@ import sys
 import time
 
 import chess
+import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -155,14 +156,24 @@ def _eval_one(args):
             except Exception:
                 pass
 
-        # Legal move mask bit-packed: 4096 bits → 512 bytes per position
-        mask = torch.zeros(4096, dtype=torch.uint8)
+        # Legal move mask bit-packed: 4096 bits → 512 bytes per position.
+        # Use numpy.packbits (stable since NumPy 1.x) instead of
+        # torch.packbits which was only added in PyTorch 1.7.0.
+        mask = np.zeros(4096, dtype=np.uint8)
         for m in board.legal_moves:
             mask[move_to_index(m, flip=flip)] = 1
-        packed_mask = torch.packbits(mask)   # shape (512,)
+        packed_mask = torch.from_numpy(np.packbits(mask))   # shape (512,)
 
         return idx, val, sf_move_idx, packed_mask, False
-    except Exception:
+    except Exception as e:
+        # Surface the exception type on first few errors so silent bugs
+        # like a missing torch API are diagnosable.
+        if not hasattr(_eval_one, "_err_reported"):
+            _eval_one._err_reported = 0
+        if _eval_one._err_reported < 3:
+            print(f"[_eval_one error #{_eval_one._err_reported+1}] {type(e).__name__}: {e}",
+                  flush=True)
+            _eval_one._err_reported += 1
         return idx, 0.0, -1, None, True
 
 
@@ -284,7 +295,6 @@ def reeval(dataset_path: str,
         print(f"WARNING: {n_missing} positions missing legal masks — masks will not be stored")
 
     # Report label distribution
-    import numpy as np
     vals = new_values.numpy()
     print(f"\nLabel statistics (SF evals, tanh-squashed):")
     print(f"  Mean:   {vals.mean():.4f}")
