@@ -109,13 +109,10 @@ class Stockfish:
                 except (ValueError, IndexError):
                     pass
 
-        is_white = fen.split()[1] == 'w'
         if mate is not None:
-            val = 1.0 if mate > 0 else -1.0
-            return val if is_white else -val
+            return 1.0 if mate > 0 else -1.0
         if cp is not None:
-            val = math.tanh(cp / 400.0)
-            return val if is_white else -val
+            return math.tanh(cp / 400.0)
         return 0.0   # fallback: unknown
 
     def close(self):
