@@ -179,16 +179,48 @@ However, the 67% step 5 result challenges a strong degeneracy claim — if the p
 
 ---
 
-## Next Steps
+---
+
+## Bug: Missing STM Flip in reeval_stockfish.py (discovered 2026-04-14)
+
+### Root Cause
+`reeval_stockfish.py` `evaluate()` returns `tanh(cp / 400)` directly from Stockfish output. Stockfish CP scores are **White-relative** (positive = White better). The method docstring claims "from the perspective of the side to move" but the STM flip was never implemented.
+
+When Black is to move, the label sign should be flipped. Without the flip, Black-to-move positions are labelled as if White is winning — introducing a systematic white-advantage bias.
+
+### Why It Wasn't Caught Earlier
+`dataset_sf.pt` (used to train `sf_gpu/best.pt`) used `min_decisive=0.3, max_pieces=20`. Heavily decisive late-game positions have a dominant win/loss signal that swamps the sign error — the bias appeared as a mild -0.168 start position value.
+
+`dataset_balanced.pt` used `min_decisive=0.05, max_pieces=32`, keeping full-board and balanced positions where the STM flip matters most. The error surfaced clearly: `sf_balanced/best.pt` start position = **+0.299**.
+
+### Affected Datasets
+Both `dataset_sf.pt` and `dataset_balanced.pt` were generated with the buggy script. Both must be regenerated after the fix.
+
+### Fix
+In `src/reeval_stockfish.py`, `evaluate()`:
+```python
+if mate is not None:
+    val = 1.0 if mate > 0 else -1.0
+    return val if fen.split()[1] == 'w' else -val
+if cp is not None:
+    val = math.tanh(cp / 400.0)
+    return val if fen.split()[1] == 'w' else -val
+return 0.0
+```
+
+### Next Steps
 
 ### Currently running
-- **Job 28200562** `reeval_balanced` — SF depth 15 re-evaluation of January 2020 Lichess data (`dataset_jan.pt`), min_decisive=0.05, max_pieces=32. ETA ~11:00 Apr 14. Produces `dataset_balanced.pt`.
+- **Job 28200694** `train_balanced_gpu` — completed (tainted; `sf_balanced/best.pt` trained on mislabelled data, start value +0.299)
+- **eval_sf** — gates running against `sf_balanced/best.pt` (results pending)
 
-### After reeval finishes
-1. `bsub < jobs/train_balanced_gpu.sh` — merge `dataset_sf.pt` (March 2020, decisive) + `dataset_balanced.pt` (January 2020, balanced) + endgame anchor. Weight decay 5e-4. Output: `models/sf_balanced/best.pt`
-2. Geometry probe on `sf_balanced/best.pt` — check if effective rank improves from 3.7
-3. Update `zigzag_r1.sh` seed model to `models/sf_balanced/best.pt`
-4. `bsub < jobs/zigzag_r1.sh` — round 1 self-play with opening book
+### After gates finish
+1. Apply STM fix to `src/reeval_stockfish.py`
+2. Re-run `reeval_sf` to regenerate `dataset_sf.pt` with correct labels
+3. Re-run `reeval_balanced` to regenerate `dataset_balanced.pt` with correct labels
+4. Re-run `train_balanced_gpu` — merged training with fixed datasets
+5. Geometry probe on new model
+6. Update `zigzag_r1.sh` seed model and submit
 
 ### Why the extra training run
 `sf_gpu/best.pt` has effective rank 3.7/128 — almost pure win/loss axis, no draw concept, opening positions OOD (trained on max_pieces=20 only). `dataset_balanced.pt` adds full-board positions and balanced labels to fill the geometry gap before self-play.
