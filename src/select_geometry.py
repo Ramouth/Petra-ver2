@@ -45,9 +45,9 @@ Usage
 
 Selection criteria (in order)
 ------------------------------
-1. Effective rank > 20     — primary (geometry uses multiple dimensions)
-2. Separation gap > 0.02   — secondary (geometry is structured along an axis)
-3. Val loss                — tiebreaker
+1. Effective rank          — primary (geometry uses multiple dimensions; higher is better)
+2. Separation gap          — secondary (geometry is structured along an axis; higher is better)
+3. β1 > 0                 — tiebreaker (loops present = non-trivial topology)
 
 Why rank before gap: a collapsed 1D geometry can have a perfect separation gap
 (all wins at one pole, all losses at the other) while effective rank = 1. That
@@ -76,7 +76,7 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
     """
     Run probe_geometry.py on one model. Returns parsed metrics dict.
 
-    Keys: separation_gap, effective_rank, raw_output, error
+    Keys: separation_gap, effective_rank, betti_1, raw_output, error
     """
     print(f"\n  Probing: {model_path}")
     result = subprocess.run(
@@ -119,7 +119,6 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
                 pass
         if "Topology:" in line and "β1=" in line:
             try:
-                import re
                 m = re.search(r"β1=(\d+)", line)
                 if m:
                     metrics["betti_1"] = int(m.group(1))
@@ -129,9 +128,13 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
     gap  = metrics["separation_gap"]
     rank = metrics["effective_rank"]
     b1   = metrics["betti_1"]
-    b1_str = f"  β1={b1}" if b1 is not None else ""
-    print(f"    separation_gap={gap:.4f}  effective_rank={rank:.1f}{b1_str}" if gap is not None
-          else "    Could not parse metrics")
+    if gap is not None or rank is not None:
+        gap_str  = f"separation_gap={gap:.4f}" if gap  is not None else "separation_gap=?"
+        rank_str = f"effective_rank={rank:.1f}" if rank is not None else "effective_rank=?"
+        b1_str   = f"  β1={b1}" if b1 is not None else ""
+        print(f"    {gap_str}  {rank_str}{b1_str}")
+    else:
+        print("    Could not parse metrics")
 
     return metrics
 
@@ -142,7 +145,7 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
 
 def select_winner(results: list) -> dict:
     """
-    Pick the best candidate by: gap → effective_rank → (tiebreaker: first).
+    Pick the best candidate by: effective_rank → separation_gap → β1 > 0.
 
     Returns the winning result dict.
     """
@@ -185,13 +188,17 @@ def print_report(results: list, winner: dict):
 
     gap  = winner["separation_gap"]
     rank = winner["effective_rank"]
+    rank_str = f"{rank:.1f}" if rank is not None else "?"
+    gap_str  = f"{gap:.4f}"  if gap  is not None else "?"
     print(f"\n  Winner: {winner['model_path']}")
-    print(f"  Rank:   {rank:.1f}  Gap: {gap:.4f}", end="")
+    print(f"  Rank:   {rank_str}  Gap: {gap_str}", end="")
 
     if rank is not None and rank < 20:
         print(f"\n\n  WARNING: Best effective rank ({rank:.1f}) < 20 — geometry may be collapsed.")
         print(f"  Consider: different LR variants, more training epochs,")
         print(f"  or check that the doover architecture fixes are applied.")
+    elif gap is None:
+        print(f"\n\n  WARNING: Could not parse separation gap — review probe output.")
     elif gap < 0.02:
         print(f"\n\n  WARNING: Best gap ({gap:.4f}) < 0.02 — geometry may be flat.")
         print(f"  Consider: different LR variants, more training epochs.")
@@ -260,7 +267,7 @@ def main():
         print(f"  Copied winner → {args.out}")
 
     # Exit non-zero if geometry is flat — lets HPC scripts detect failure
-    if winner["separation_gap"] < 0.02:
+    if winner["separation_gap"] is None or winner["separation_gap"] < 0.02:
         sys.exit(2)   # 2 = flat geometry (distinct from 1 = script error)
 
 
