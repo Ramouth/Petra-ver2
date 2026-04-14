@@ -34,6 +34,9 @@ from torch.utils.data import DataLoader, TensorDataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import PetraNet
 from config import device
+from topology_monitor import (topological_health_check,
+                               should_abort_early,
+                               format_topology_line)
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +366,8 @@ def train(dataset_path: str = None,
     epochs_no_improve = 0
     current_patience  = patience
     phase_transition  = False
+    topo_trajectory   = []
+    topo_check_every  = 2  # check every 2 epochs — lightweight enough
 
     print(f"Patience: {patience} (tight={tight_patience} after >{transition_drop*100:.0f}% val drop)\n")
     print(f"{'Epoch':>5}  {'T-loss':>7}  {'V-loss':>7}  {'V-MSE':>6}  "
@@ -407,6 +412,19 @@ def train(dataset_path: str = None,
               f"{val_m['top5']:>5.3f}  "
               f"{lr_now:>8.2e}  "
               f"({elapsed:.0f}s)")
+
+        # Topological health check every 2 epochs (epochs 1, 3, 5, ...)
+        if epoch % topo_check_every == 1:
+            topo = topological_health_check(model, val_loader, epoch,
+                                            device=device)
+            topo_trajectory.append(topo)
+            print(format_topology_line(topo))
+
+            abort, reason = should_abort_early(topo_trajectory)
+            if abort:
+                print(f"\nTopological early abort at epoch {epoch}: {reason}")
+                print(f"  Try a different seed or learning rate.")
+                sys.exit(3)  # 3 = topological abort (distinct from other exits)
 
         torch.save(model.state_dict(), os.path.join(out_dir, "latest.pt"))
 

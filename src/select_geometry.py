@@ -95,6 +95,7 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
         "model_path":     model_path,
         "separation_gap": None,
         "effective_rank": None,
+        "betti_1":        None,
         "raw_output":     result.stdout,
         "error":          result.returncode != 0,
     }
@@ -104,7 +105,7 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
         print(result.stderr[:200] if result.stderr else "(no stderr)")
         return metrics
 
-    # Parse separation gap from Check 2
+    # Parse metrics from probe output
     for line in result.stdout.splitlines():
         if "Separation gap:" in line:
             try:
@@ -116,10 +117,20 @@ def probe_candidate(model_path: str, dataset_path: str, n: int) -> dict:
                 metrics["effective_rank"] = float(line.split(":")[1].split("/")[0].strip())
             except (ValueError, IndexError):
                 pass
+        if "Topology:" in line and "β1=" in line:
+            try:
+                import re
+                m = re.search(r"β1=(\d+)", line)
+                if m:
+                    metrics["betti_1"] = int(m.group(1))
+            except (ValueError, AttributeError):
+                pass
 
     gap  = metrics["separation_gap"]
     rank = metrics["effective_rank"]
-    print(f"    separation_gap={gap:.4f}  effective_rank={rank:.1f}" if gap is not None
+    b1   = metrics["betti_1"]
+    b1_str = f"  β1={b1}" if b1 is not None else ""
+    print(f"    separation_gap={gap:.4f}  effective_rank={rank:.1f}{b1_str}" if gap is not None
           else "    Could not parse metrics")
 
     return metrics
@@ -142,10 +153,11 @@ def select_winner(results: list) -> dict:
         print("\nERROR: No valid probe results. Cannot select a winner.")
         sys.exit(1)
 
-    # Sort: higher effective_rank first (prevents 1D collapse), then separation_gap.
+    # Sort: effective_rank → separation_gap → β1 (tiebreaker: loops = structure).
     valid.sort(key=lambda r: (
         r["effective_rank"]  if r["effective_rank"]  is not None else 0,
         r["separation_gap"]  if r["separation_gap"]  is not None else -999,
+        1 if (r["betti_1"] or 0) > 0 else 0,   # β1 > 0 preferred
     ), reverse=True)
 
     return valid[0]
@@ -159,16 +171,17 @@ def print_report(results: list, winner: dict):
     print("\n" + "="*60)
     print("A/B GEOMETRY SELECTION REPORT")
     print("="*60)
-    print(f"\n  {'Model':<45}  {'Gap':>7}  {'Rank':>6}  {'Status'}")
-    print(f"  {'-'*45}  {'-------':>7}  {'------':>6}  ------")
+    print(f"\n  {'Model':<45}  {'Gap':>7}  {'Rank':>6}  {'β1':>4}  {'Status'}")
+    print(f"  {'-'*45}  {'-------':>7}  {'------':>6}  {'----':>4}  ------")
 
     for r in results:
         gap  = f"{r['separation_gap']:.4f}" if r['separation_gap'] is not None else "ERROR"
         rank = f"{r['effective_rank']:.1f}" if r['effective_rank'] is not None else "  —"
+        b1   = str(r['betti_1']) if r['betti_1'] is not None else "?"
         is_winner = (r["model_path"] == winner["model_path"])
         status = "← WINNER" if is_winner else ""
         name = os.path.basename(os.path.dirname(r["model_path"]))
-        print(f"  {name:<45}  {gap:>7}  {rank:>6}  {status}")
+        print(f"  {name:<45}  {gap:>7}  {rank:>6}  {b1:>4}  {status}")
 
     gap  = winner["separation_gap"]
     rank = winner["effective_rank"]

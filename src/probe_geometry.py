@@ -86,6 +86,44 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
+def alignment(win_vecs: np.ndarray, loss_vecs: np.ndarray,
+              alpha: float = 2.0) -> float:
+    """
+    Alignment loss: mean pairwise distance within class.
+    Lower = better aligned (same-class vectors are close).
+    Wang & Isola (2020), alpha=2.
+    """
+    def pairwise_alignment(vecs):
+        rng = np.random.default_rng(42)
+        n = len(vecs)
+        n_pairs = min(500, n * (n - 1) // 2)
+        i_idx = rng.integers(0, n, n_pairs)
+        j_idx = rng.integers(0, n, n_pairs)
+        mask = i_idx != j_idx
+        i_idx, j_idx = i_idx[mask], j_idx[mask]
+        diffs = vecs[i_idx] - vecs[j_idx]
+        return float(np.mean(np.linalg.norm(diffs, axis=1) ** alpha))
+
+    return (pairwise_alignment(win_vecs) + pairwise_alignment(loss_vecs)) / 2
+
+
+def uniformity(vecs: np.ndarray, t: float = 2.0) -> float:
+    """
+    Uniformity loss: log mean pairwise Gaussian kernel.
+    Lower = more uniformly distributed on the sphere.
+    Wang & Isola (2020), t=2.
+    """
+    rng = np.random.default_rng(42)
+    n = len(vecs)
+    n_pairs = min(1000, n * (n - 1) // 2)
+    i_idx = rng.integers(0, n, n_pairs)
+    j_idx = rng.integers(0, n, n_pairs)
+    mask = i_idx != j_idx
+    i_idx, j_idx = i_idx[mask], j_idx[mask]
+    sq_dists = np.sum((vecs[i_idx] - vecs[j_idx]) ** 2, axis=1)
+    return float(np.log(np.mean(np.exp(-t * sq_dists))) + 1e-8)
+
+
 # ---------------------------------------------------------------------------
 # Check 1: Eigenvalue distribution
 # ---------------------------------------------------------------------------
@@ -187,6 +225,13 @@ def check_label_separation(vecs: np.ndarray, values: np.ndarray):
     else:
         print(f"\n  NONE — win/loss positions are not separated")
 
+    # Alignment + uniformity (Wang & Isola 2020)
+    align = alignment(win_vecs, loss_vecs)
+    unif  = uniformity(np.vstack([win_vecs, loss_vecs]))
+    print(f"\n  Alignment  : {align:.4f}  (lower = tighter same-class clusters)")
+    print(f"  Uniformity : {unif:.4f}  (lower = better spread across sphere)")
+    print(f"  Note: both should improve together — one without the other is a warning sign")
+
     return c_win, c_loss
 
 
@@ -268,6 +313,30 @@ def check_nearest_neighbours(vecs: np.ndarray, values: np.ndarray, k: int = 5, n
 
 
 # ---------------------------------------------------------------------------
+# Check 5: Topological health
+# ---------------------------------------------------------------------------
+
+def check_topology(model: PetraNet, val_loader, n_sample: int = 300):
+    print("\n" + "="*60)
+    print("CHECK 5 — Topological health (β0, β1, persistence entropy)")
+    print("="*60)
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from topology_monitor import topological_health_check, format_topology_line
+
+    topo = topological_health_check(model, val_loader, epoch=999,
+                                    n_sample=n_sample, device=device)
+    print(format_topology_line(topo))
+    b1 = topo.get("betti_1")
+    if b1 is not None:
+        if b1 > 0:
+            print(f"\n  GOOD — β1={b1} loops detected: geometry has non-trivial structure")
+        else:
+            print(f"\n  FLAT — β1=0: geometry may be a linear manifold (no loops)")
+    return topo
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -292,6 +361,17 @@ def main():
     c_win, c_loss = check_label_separation(vecs, values)
     check_known_positions(model, c_win, c_loss)
     check_nearest_neighbours(vecs, values)
+
+    # Build a minimal val_loader for the topology check
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    data   = torch.load(args.dataset, map_location="cpu", weights_only=False)
+    split  = data["val"]
+    t_val  = split["tensors"][:args.n].float()
+    v_val  = split["values"][:args.n]
+    ds_val = TensorDataset(t_val, v_val)
+    val_loader = DataLoader(ds_val, batch_size=256, shuffle=False)
+    check_topology(model, val_loader)
 
     print("\n" + "="*60)
     print("Probe complete.")
