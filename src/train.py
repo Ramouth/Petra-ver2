@@ -173,15 +173,19 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
         "visit_dists": torch.cat([primary_vd,                         vd]),
     }
 
-    # Preserve legal masks from primary data. Endgame anchors have no precomputed
-    # masks — substitute all-ones (0xFF = all bits set = no masking effect).
-    if "legal_masks" in primary_data["train"]:
+    # Preserve legal masks when available from either side.
+    # If one side is missing masks, substitute all-ones (0xFF = all bits
+    # set = all moves legal = no masking effect).
+    if "legal_masks" in primary_data["train"] or "legal_masks" in a:
+        primary_masks = primary_data["train"].get(
+            "legal_masks",
+            torch.full((n_primary, 512), 255, dtype=torch.uint8),
+        )
         if "legal_masks" in a:
             anchor_masks = a["legal_masks"][idx]
         else:
             anchor_masks = torch.full((n_sample, 512), 255, dtype=torch.uint8)
-        mixed["legal_masks"] = torch.cat([primary_data["train"]["legal_masks"],
-                                          anchor_masks])
+        mixed["legal_masks"] = torch.cat([primary_masks, anchor_masks])
 
     print(f"  anchor positions sampled: {n_sample:,} / {n_anchor:,}")
     print(f"  mixed train size: {len(mixed['tensors']):,}  "
