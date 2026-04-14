@@ -25,6 +25,8 @@ import os
 import sys
 import time
 
+import random
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -198,6 +200,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
               policy_weight: float = 1.0):
     model.train(is_train)
     total_loss = total_vloss = total_ploss = 0.0
+    total_grad_norm = 0.0
     n_batches = 0
     all_value_preds, all_value_targets = [], []
     policy_correct_top1 = policy_correct_top5 = policy_total = 0
@@ -205,21 +208,22 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for batch in loader:
+            # 5th element is pre-unpacked (N, 4096) bool — see _make_loader.
             if dense_policy:
                 if len(batch) == 5:
-                    tensors, values, move_idxs, visit_dists, legal_masks_packed = batch
-                    legal_masks_packed = legal_masks_packed.to(device)
+                    tensors, values, move_idxs, visit_dists, legal_bool = batch
+                    legal_bool = legal_bool.to(device)
                 else:
                     tensors, values, move_idxs, visit_dists = batch
-                    legal_masks_packed = None
+                    legal_bool = None
                 visit_dists = visit_dists.to(device)
             else:
                 if len(batch) == 4:
-                    tensors, values, move_idxs, legal_masks_packed = batch
-                    legal_masks_packed = legal_masks_packed.to(device)
+                    tensors, values, move_idxs, legal_bool = batch
+                    legal_bool = legal_bool.to(device)
                 else:
                     tensors, values, move_idxs = batch
-                    legal_masks_packed = None
+                    legal_bool = None
 
             tensors   = tensors.float().to(device)   # uint8 → float32
             values    = values.to(device)
@@ -228,16 +232,14 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             value_pred, policy_logits = model(tensors)
             value_pred = value_pred.squeeze(1)
 
-            # Unpack bit-packed legal masks → (B, 4096) bool, then mask logits.
-            # Use numpy.unpackbits (stable since NumPy 1.x) instead of
-            # torch.unpackbits which was only added in PyTorch 1.7.0.
-            if legal_masks_packed is not None:
-                B = policy_logits.shape[0]
-                legal_np = np.unpackbits(
-                    legal_masks_packed.cpu().numpy().reshape(-1)
-                ).reshape(B, 4096)
-                legal_bool = torch.from_numpy(legal_np).bool().to(device)
+            if legal_bool is not None:
                 eff_logits = policy_logits.masked_fill(~legal_bool, float("-inf"))
+                # Guard: if a row is all-illegal (e.g. terminal position in dataset),
+                # -inf everywhere → NaN from log_softmax. Fall back to unmasked logits.
+                all_masked = ~legal_bool.any(dim=1)
+                if all_masked.any():
+                    eff_logits = eff_logits.clone()
+                    eff_logits[all_masked] = policy_logits[all_masked]
             else:
                 eff_logits = policy_logits
 
@@ -253,7 +255,8 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_grad_norm += float(grad_norm)
                 optimizer.step()
 
             total_loss  += loss.item()
@@ -283,6 +286,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
         "value_r2":   r2,
         "top1":       policy_correct_top1 / policy_total,
         "top5":       policy_correct_top5 / policy_total,
+        "grad_norm":  total_grad_norm / n_batches if is_train else 0.0,
     }
 
 
@@ -297,12 +301,15 @@ def train(dataset_path: str = None,
           transition_drop: float = 0.5,
           seed: int = 42,
           init_model: str = None,
+          resume: str = None,
           extra_dataset: str = None,
           anchor_dataset: str = None,
           anchor_frac: float = 0.15,
           policy_weight: float = 1.0,
           endgame_positions: int = 0,
-          endgame_stages=None):
+          endgame_stages=None,
+          num_workers: int = 0,
+          deterministic: bool = False):
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -311,6 +318,12 @@ def train(dataset_path: str = None,
         _stages = [_stages]
 
     torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print(f"Deterministic mode enabled (seed={seed})")
     os.makedirs(out_dir, exist_ok=True)
 
     def _fresh_endgame_data():
@@ -339,10 +352,17 @@ def train(dataset_path: str = None,
         d = data[split]
         tensors_list = [d["tensors"], d["values"], d["move_idxs"], _ensure_visit_dists(d)]
         if "legal_masks" in d:
-            tensors_list.append(d["legal_masks"])
+            # Pre-unpack once at loader creation: (N, 512) uint8 → (N, 4096) bool.
+            # Avoids a numpy CPU round-trip on every batch during training.
+            unpacked = torch.from_numpy(
+                np.unpackbits(d["legal_masks"].numpy().reshape(-1))
+                .reshape(len(d["tensors"]), 4096)
+            ).bool()
+            tensors_list.append(unpacked)
         ds = TensorDataset(*tensors_list)
         return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                          num_workers=0, pin_memory=(device.type == "cuda"))
+                          num_workers=num_workers,
+                          pin_memory=(device.type == "cuda"))
 
     train_loader = _make_loader(data, "train", shuffle=True)
     val_loader   = _make_loader(data, "val",   shuffle=False)
@@ -368,13 +388,25 @@ def train(dataset_path: str = None,
     phase_transition  = False
     topo_trajectory   = []
     topo_check_every  = 2  # check every 2 epochs — lightweight enough
+    start_epoch       = 1
+
+    # Resume from full training-state checkpoint (model + optimizer + scheduler)
+    if resume:
+        ckpt = torch.load(resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        start_epoch       = ckpt["epoch"] + 1
+        best_val_loss     = ckpt["best_val_loss"]
+        epochs_no_improve = ckpt.get("epochs_no_improve", 0)
+        print(f"Resumed from {resume}  (epoch {ckpt['epoch']}, best_val={best_val_loss:.4f})")
 
     print(f"Patience: {patience} (tight={tight_patience} after >{transition_drop*100:.0f}% val drop)\n")
     print(f"{'Epoch':>5}  {'T-loss':>7}  {'V-loss':>7}  {'V-MSE':>6}  "
-          f"{'V-R²':>6}  {'Top1':>5}  {'Top5':>5}  {'LR':>8}")
-    print("-" * 65)
+          f"{'V-R²':>6}  {'Top1':>5}  {'Top5':>5}  {'LR':>8}  {'GNorm':>6}")
+    print("-" * 73)
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         t0 = time.time()
 
         # Regenerate endgame positions each epoch — prevents memorisation
@@ -411,6 +443,7 @@ def train(dataset_path: str = None,
               f"{val_m['top1']:>5.3f}  "
               f"{val_m['top5']:>5.3f}  "
               f"{lr_now:>8.2e}  "
+              f"{train_m['grad_norm']:>6.3f}  "
               f"({elapsed:.0f}s)")
 
         # Topological health check every 2 epochs (epochs 1, 3, 5, ...)
@@ -427,6 +460,16 @@ def train(dataset_path: str = None,
                 sys.exit(3)  # 3 = topological abort (distinct from other exits)
 
         torch.save(model.state_dict(), os.path.join(out_dir, "latest.pt"))
+
+        # Full training-state checkpoint — enables true resume on HPC preemption
+        torch.save({
+            "epoch":            epoch,
+            "model":            model.state_dict(),
+            "optimizer":        optimizer.state_dict(),
+            "scheduler":        scheduler.state_dict(),
+            "best_val_loss":    best_val_loss,
+            "epochs_no_improve": epochs_no_improve,
+        }, os.path.join(out_dir, "resume.pt"))
 
         if val_m["loss"] < best_val_loss:
             best_val_loss     = val_m["loss"]
@@ -521,6 +564,15 @@ def main():
                          "Replaces --dataset for the endgame curriculum.")
     ap.add_argument("--endgame-stages", type=int, nargs="+", default=[1],
                     help="Endgame stages: 1=KQK 2=KRK 3=KPK 4=KQvKR ... (default: 1)")
+    ap.add_argument("--num-workers",   type=int, default=0,
+                    help="DataLoader worker processes (default: 0). "
+                         "Set to 2-4 on GPU nodes to overlap data loading with compute.")
+    ap.add_argument("--resume",        default=None,
+                    help="Path to resume.pt to continue a previous run "
+                         "(restores model, optimizer, scheduler, epoch, best loss).")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="Enable cuDNN deterministic mode for reproducibility "
+                         "(slightly slower). Also seeds numpy and random.")
     args = ap.parse_args()
 
     if args.dataset is None and args.endgame_positions == 0:
@@ -544,6 +596,9 @@ def main():
         policy_weight=args.policy_weight,
         endgame_positions=args.endgame_positions,
         endgame_stages=args.endgame_stages,
+        num_workers=args.num_workers,
+        resume=args.resume,
+        deterministic=args.deterministic,
     )
 
 
