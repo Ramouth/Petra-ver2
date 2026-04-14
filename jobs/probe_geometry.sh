@@ -11,16 +11,16 @@ source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
 module load cuda/12.1
 
-# Baseline geometry health check on the supervised SF model.
-# Run this before zigzag round 1 to get baseline numbers:
-#   - Effective rank (target > 30)
-#   - Win/loss centroid cosine (lower = better; R4 was 0.869)
-#   - Separation gap (higher = better; R4 was 0.048, R2 peak was 0.057)
-#   - NN label consistency
-# After each zigzag round, rerun with the new model to track progress.
-# If separation gap does not improve after round 2, consider endgame anchoring.
+# Geometry health check on the balanced supervised model (sf_balanced).
+# Baseline from previous sf_gpu run:
+#   - Effective rank: 3.7 / 128  (collapsed)
+#   - Separation gap: low
+# Target after balanced training:
+#   - Effective rank > 30
+#   - Separation gap > 0.05
+#   - β1 > 0 (topology healthy)
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/probe_geometry.py \
-    --model   /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
-    --dataset /zhome/81/b/206091/Petra-ver2/data/dataset_sf.pt \
+    --model   /zhome/81/b/206091/Petra-ver2/models/sf_balanced/best.pt \
+    --dataset /zhome/81/b/206091/Petra-ver2/data/dataset_balanced.pt \
     --n 5000
