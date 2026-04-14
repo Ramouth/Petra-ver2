@@ -355,6 +355,7 @@ def main():
             gate_n_games=SMOKE_GATE_GAMES,
             gate_n_sim=SMOKE_GATE_N_SIM,
             n_seeds=1,   # always single seed in smoke test
+            stockfish=args.stockfish,
         )
         if passed:
             print(f"\nSmoke test complete. Pipeline is wired correctly.")

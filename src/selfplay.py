@@ -34,6 +34,14 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from board import board_to_tensor, move_to_index
+
+def _compute_legal_mask(board: chess.Board) -> np.ndarray:
+    """Return a (512,) uint8 bit-packed legal move mask for board."""
+    flip = (board.turn == chess.BLACK)
+    mask = np.zeros(4096, dtype=np.uint8)
+    for m in board.legal_moves:
+        mask[move_to_index(m, flip=flip)] = 1
+    return np.packbits(mask)   # (512,) uint8
 from model import PetraNet
 from mcts import MCTS, DRAW_VALUE
 
@@ -122,7 +130,7 @@ def _play_game(model_path: str, n_sim: int, game_idx: int,
         # High-confidence positions near resignation are the most signal-rich.
         # Use .numpy() to avoid PyTorch shared-memory fd passing across pool workers.
         positions.append((board.fen(), board_to_tensor(board).numpy(), visit_dist,
-                          half_move, board.turn))
+                          half_move, board.turn, _compute_legal_mask(board)))
 
         # --- Resign check (use raw model value, not MCTS Q) ---
         val = model.value(board, device)
@@ -210,6 +218,7 @@ def play_games(model_path: str, n_games: int, n_sim: int, workers: int,
     all_values      = []
     all_move_idxs   = []
     all_turns       = []   # chess.Color per position — needed for flip in visit_dist encoding
+    all_legal_masks = []   # (512,) uint8 bit-packed per position
     outcome_counts  = {"decisive": 0, "draw": 0}   # for reporting
 
     rng = np.random.default_rng(seed=None)
@@ -228,13 +237,14 @@ def play_games(model_path: str, n_games: int, n_sim: int, workers: int,
             outcome_counts["draw"] += 1
         else:
             outcome_counts["decisive"] += 1
-        for fen, tensor, visit_dist, _, turn in result["positions"]:
+        for fen, tensor, visit_dist, _, turn, legal_mask in result["positions"]:
             flip = (turn == chess.BLACK)
             all_fens.append(fen)
             all_tensors.append(torch.from_numpy(tensor))
             all_visit_dists.append(visit_dist)
             all_values.append(_outcome_to_value(outcome, fen))
             all_turns.append(turn)
+            all_legal_masks.append(legal_mask)
             best_move = max(visit_dist, key=visit_dist.get) if visit_dist else None
             all_move_idxs.append(move_to_index(best_move, flip=flip) if best_move else 0)
 
@@ -276,6 +286,9 @@ def play_games(model_path: str, n_games: int, n_sim: int, workers: int,
     tensors_uint8 = torch.stack(all_tensors).to(torch.uint8)  # (N,14,8,8)
     values        = torch.tensor(all_values, dtype=torch.float32)
     move_idxs     = torch.tensor(all_move_idxs, dtype=torch.int64)
+    legal_masks   = torch.from_numpy(
+        np.stack(all_legal_masks)   # (N, 512) uint8 bit-packed
+    )
 
     visit_dist_t  = torch.zeros(n, 4096, dtype=torch.float32)
     for i, vd in enumerate(all_visit_dists):
@@ -301,6 +314,7 @@ def play_games(model_path: str, n_games: int, n_sim: int, workers: int,
             "values":      _split(values,        t_idx),
             "move_idxs":   _split(move_idxs,     t_idx),
             "visit_dists": _split(visit_dist_t,  t_idx),
+            "legal_masks": _split(legal_masks,   t_idx),
             "fens":        _split_fens(all_fens, t_idx),
         },
         "val": {
@@ -308,6 +322,7 @@ def play_games(model_path: str, n_games: int, n_sim: int, workers: int,
             "values":      _split(values,        v_idx),
             "move_idxs":   _split(move_idxs,     v_idx),
             "visit_dists": _split(visit_dist_t,  v_idx),
+            "legal_masks": _split(legal_masks,   v_idx),
             "fens":        _split_fens(all_fens, v_idx),
         },
         "meta": {
