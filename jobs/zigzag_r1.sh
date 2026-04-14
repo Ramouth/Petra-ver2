@@ -46,8 +46,9 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/gen_openings.py \
 python3 -u /zhome/81/b/206091/Petra-ver2/src/zigzag.py \
     --rounds       1 \
     --workers      16 \
-    --seed-model   /zhome/81/b/206091/Petra-ver2/models/sf_gpu/best.pt \
+    --seed-model   /zhome/81/b/206091/Petra-ver2/models/sf_balanced/best.pt \
     --sf-anchor    /zhome/81/b/206091/Petra-ver2/data/endgame_anchor.pt \
     --anchor-frac  0.20 \
     --opening-book /zhome/81/b/206091/Petra-ver2/data/openings.txt \
+    --stockfish    /zhome/81/b/206091/bin/stockfish \
     --n-seeds      3

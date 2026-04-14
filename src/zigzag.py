@@ -182,7 +182,8 @@ def run_round(r: int, n_sim: int, sf_depth: int, n_games: int, lr: float,
               epochs: int = 15,
               gate_n_games: int = GATE_N_GAMES,
               gate_n_sim: int = GATE_N_SIM,
-              n_seeds: int = 1) -> bool:
+              n_seeds: int = 1,
+              stockfish: str = None) -> bool:
     """
     Execute one full zigzag round. Returns True if gate passed.
     """
@@ -219,13 +220,16 @@ def run_round(r: int, n_sim: int, sf_depth: int, n_games: int, lr: float,
 
     # --- 2. SF re-label ---
     print(f"\n--- Step 2: Stockfish re-label (depth {sf_depth}) ---")
-    rc = _run([
+    reeval_cmd = [
         sys.executable, os.path.join(SRC_DIR, "reeval_stockfish.py"),
         "--dataset", selfplay_pt,
         "--out",     sf_pt,
         "--depth",   str(sf_depth),
         "--workers", str(workers),
-    ], dry_run)
+    ]
+    if stockfish:
+        reeval_cmd += ["--stockfish", stockfish]
+    rc = _run(reeval_cmd, dry_run)
     if rc != 0:
         print(f"  SF re-label failed (exit {rc}). Aborting round.")
         return False
@@ -263,6 +267,7 @@ def run_round(r: int, n_sim: int, sf_depth: int, n_games: int, lr: float,
         "--step",       "5",
         "--games",      str(gate_n_games),
         "--n-sim",      str(gate_n_sim),
+        "--workers",    str(workers),
         "--temp-moves", "10",
     ], dry_run)
     # evaluate.py writes its own output to stdout — capture to log as well
@@ -307,6 +312,10 @@ def main():
     ap.add_argument("--seed-model",  type=str, default=None,
                     help="Path to round-0 seed model (default: models/sf/best.pt). "
                          "Override when the supervised model is saved elsewhere.")
+    ap.add_argument("--stockfish",   type=str, default=None,
+                    help="Path to Stockfish binary for SF re-label step. "
+                         "Defaults to reeval_stockfish.py default (/usr/games/stockfish). "
+                         "Must be set on HPC where Stockfish is not in /usr/games/.")
     ap.add_argument("--smoke",       action="store_true",
                     help="Smoke test: run round 1 at tiny scale to verify pipeline wiring. "
                          f"Uses {SMOKE_N_GAMES} games, n_sim={SMOKE_N_SIM}, "
@@ -382,6 +391,7 @@ def main():
             anchor_frac=args.anchor_frac,
             opening_book=args.opening_book,
             n_seeds=args.n_seeds,
+            stockfish=args.stockfish,
         )
 
         if not passed:
