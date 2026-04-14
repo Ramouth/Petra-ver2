@@ -59,9 +59,10 @@ def load_dataset(path: str):
 
     def make_loader(split, batch_size, shuffle):
         d = data[split]
-        ds = TensorDataset(
-            d["tensors"], d["values"], d["move_idxs"], _ensure_visit_dists(d)
-        )
+        tensors_list = [d["tensors"], d["values"], d["move_idxs"], _ensure_visit_dists(d)]
+        if "legal_masks" in d:
+            tensors_list.append(d["legal_masks"])
+        ds = TensorDataset(*tensors_list)
         return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
                           num_workers=0, pin_memory=(device.type == "cuda"))
 
@@ -104,6 +105,8 @@ def merge_datasets(primary_data: dict, extra_path: str) -> dict:
             "visit_dists": torch.cat([_ensure_visit_dists(a),
                                       _ensure_visit_dists(b)]),
         }
+        if "legal_masks" in a and "legal_masks" in b:
+            merged["legal_masks"] = torch.cat([a["legal_masks"], b["legal_masks"]])
         # Shuffle so batches contain positions from both datasets
         perm = torch.randperm(len(merged["tensors"]))
         return {k: v[perm] for k, v in merged.items()}
@@ -183,10 +186,20 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
     with ctx:
         for batch in loader:
             if dense_policy:
-                tensors, values, move_idxs, visit_dists = batch
+                if len(batch) == 5:
+                    tensors, values, move_idxs, visit_dists, legal_masks_packed = batch
+                    legal_masks_packed = legal_masks_packed.to(device)
+                else:
+                    tensors, values, move_idxs, visit_dists = batch
+                    legal_masks_packed = None
                 visit_dists = visit_dists.to(device)
             else:
-                tensors, values, move_idxs = batch
+                if len(batch) == 4:
+                    tensors, values, move_idxs, legal_masks_packed = batch
+                    legal_masks_packed = legal_masks_packed.to(device)
+                else:
+                    tensors, values, move_idxs = batch
+                    legal_masks_packed = None
 
             tensors   = tensors.float().to(device)   # uint8 → float32
             values    = values.to(device)
@@ -195,13 +208,23 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             value_pred, policy_logits = model(tensors)
             value_pred = value_pred.squeeze(1)
 
+            # Unpack bit-packed legal masks → (B, 4096) bool, then mask logits
+            if legal_masks_packed is not None:
+                B = policy_logits.shape[0]
+                legal_bool = torch.unpackbits(
+                    legal_masks_packed.cpu().reshape(-1)
+                ).reshape(B, 4096).bool().to(device)
+                eff_logits = policy_logits.masked_fill(~legal_bool, float("-inf"))
+            else:
+                eff_logits = policy_logits
+
             vloss = F.mse_loss(value_pred, values)
             if dense_policy:
-                # KL(visit_dist || softmax(logits)) — dense target from MCTS
-                log_probs = F.log_softmax(policy_logits, dim=-1)
+                # KL(visit_dist || softmax(logits)) — masked to legal moves when available
+                log_probs = F.log_softmax(eff_logits, dim=-1)
                 ploss = -(visit_dists * log_probs).sum(dim=-1).mean()
             else:
-                ploss = F.cross_entropy(policy_logits, move_idxs)
+                ploss = F.cross_entropy(eff_logits, move_idxs)
             loss  = vloss + policy_weight * ploss
 
             if is_train:
@@ -219,7 +242,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             all_value_preds.append(value_pred.detach().cpu())
             all_value_targets.append(values.detach().cpu())
 
-            topk = policy_logits.topk(5, dim=1).indices
+            topk = eff_logits.topk(5, dim=1).indices
             policy_correct_top1 += (topk[:, 0] == move_idxs).sum().item()
             policy_correct_top5 += (topk == move_idxs.unsqueeze(1)).any(dim=1).sum().item()
             policy_total        += len(move_idxs)
@@ -291,9 +314,10 @@ def train(dataset_path: str = None,
 
     def _make_loader(data, split, shuffle):
         d = data[split]
-        ds = TensorDataset(
-            d["tensors"], d["values"], d["move_idxs"], _ensure_visit_dists(d)
-        )
+        tensors_list = [d["tensors"], d["values"], d["move_idxs"], _ensure_visit_dists(d)]
+        if "legal_masks" in d:
+            tensors_list.append(d["legal_masks"])
+        ds = TensorDataset(*tensors_list)
         return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
                           num_workers=0, pin_memory=(device.type == "cuda"))
 
