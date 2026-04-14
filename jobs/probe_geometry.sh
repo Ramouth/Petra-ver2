@@ -9,7 +9,6 @@
 
 source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
-module load cuda/12.1
 
 # Geometry health check on the balanced supervised model (sf_balanced).
 # Baseline from previous sf_gpu run:

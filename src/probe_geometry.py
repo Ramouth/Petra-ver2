@@ -363,7 +363,6 @@ def main():
     check_nearest_neighbours(vecs, values)
 
     # Build a minimal val_loader for the topology check
-    import torch
     from torch.utils.data import DataLoader, TensorDataset
     data   = torch.load(args.dataset, map_location="cpu", weights_only=False)
     split  = data["val"]
