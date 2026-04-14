@@ -138,7 +138,7 @@ WARN  = "~ WARN"
 # Test 1: Material monotonicity
 # ---------------------------------------------------------------------------
 
-def test_material_monotonicity(model: PetraNet, axis: np.ndarray):
+def check_material_monotonicity(model: PetraNet, axis: np.ndarray):
     print("\n" + "="*60)
     print("TEST 1 — Material monotonicity")
     print("  Adding stronger pieces should increase outcome-probe projection.")
@@ -178,7 +178,7 @@ def test_material_monotonicity(model: PetraNet, axis: np.ndarray):
 # Test 2: Piece value ordering
 # ---------------------------------------------------------------------------
 
-def test_piece_value_ordering(model: PetraNet, axis: np.ndarray):
+def check_piece_value_ordering(model: PetraNet, axis: np.ndarray):
     print("\n" + "="*60)
     print("TEST 2 — Piece value ordering")
     print("  Outcome-probe projection should respect Q > R > B ≈ N > P.")
@@ -227,7 +227,7 @@ def test_piece_value_ordering(model: PetraNet, axis: np.ndarray):
 # Test 3: STM symmetry
 # ---------------------------------------------------------------------------
 
-def test_stm_symmetry(model: PetraNet):
+def check_stm_symmetry(model: PetraNet):
     print("\n" + "="*60)
     print("TEST 3 — STM symmetry")
     print("  board.mirror() swaps colors AND side to move.")
@@ -272,7 +272,7 @@ def test_stm_symmetry(model: PetraNet):
 # Test 4: Forced mate convergence
 # ---------------------------------------------------------------------------
 
-def test_forced_mate_convergence(model: PetraNet, axis: np.ndarray):
+def check_forced_mate_convergence(model: PetraNet, axis: np.ndarray):
     print("\n" + "="*60)
     print("TEST 4 — Forced mate convergence")
     print("  As mate approaches (KQ vs K), outcome-probe projection should increase.")
@@ -307,7 +307,7 @@ def test_forced_mate_convergence(model: PetraNet, axis: np.ndarray):
 # Test 5: Transposition consistency
 # ---------------------------------------------------------------------------
 
-def test_transposition_consistency(model: PetraNet):
+def check_transposition_consistency(model: PetraNet):
     print("\n" + "="*60)
     print("TEST 5 — Transposition consistency")
     print("  Same position via different move orders should give same geometry.")
@@ -416,11 +416,11 @@ def main():
     print(f"  (R² > 0.1 suggests geometry carries meaningful game-outcome signal)")
 
     results = {}
-    results["Material monotonicity"]     = test_material_monotonicity(model, axis)
-    results["Piece value ordering"]      = test_piece_value_ordering(model, axis)
-    results["STM symmetry"]              = test_stm_symmetry(model)
-    results["Forced mate convergence"]   = test_forced_mate_convergence(model, axis)
-    results["Transposition consistency"] = test_transposition_consistency(model)
+    results["Material monotonicity"]     = check_material_monotonicity(model, axis)
+    results["Piece value ordering"]      = check_piece_value_ordering(model, axis)
+    results["STM symmetry"]              = check_stm_symmetry(model)
+    results["Forced mate convergence"]   = check_forced_mate_convergence(model, axis)
+    results["Transposition consistency"] = check_transposition_consistency(model)
 
     print_summary(results)
 

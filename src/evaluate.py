@@ -29,10 +29,10 @@ Ablation ladder (run in order after supervised pretraining):
 
 Usage
 -----
-    python3 evaluate.py --model models/best.pt --games 100 --step 5
-    python3 evaluate.py --model models/best.pt --games 200 --all-steps
-    python3 evaluate.py --model models/best.pt --games 100 --step 5 --workers 4
-    python3 evaluate.py --model models/best.pt --games 100 --step 6
+    python3 src/evaluate.py --model models/best.pt --games 100 --step 5
+    python3 src/evaluate.py --model models/best.pt --games 200 --all-steps
+    python3 src/evaluate.py --model models/best.pt --games 100 --step 5 --workers 4
+    python3 src/evaluate.py --model models/best.pt --games 100 --step 6
 """
 
 import argparse
