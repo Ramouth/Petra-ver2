@@ -249,8 +249,11 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
 
             vloss = F.mse_loss(value_pred, values)
             if dense_policy:
-                # KL(visit_dist || softmax(logits)) — masked to legal moves when available
-                log_probs = F.log_softmax(eff_logits, dim=-1)
+                # KL(visit_dist || softmax(logits)) — masked to legal moves when available.
+                # Clamp to -1e9 before multiplying: 0 * (-inf) = NaN in IEEE 754, but
+                # 0 * (-1e9) = 0.  This occurs whenever visit_dists is zero for an
+                # illegal move whose logit was masked to -inf.
+                log_probs = F.log_softmax(eff_logits, dim=-1).clamp(min=-1e9)
                 ploss = -(visit_dists * log_probs).sum(dim=-1).mean()
             else:
                 ploss = F.cross_entropy(eff_logits, move_idxs)
