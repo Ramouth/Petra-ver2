@@ -25,6 +25,7 @@ import os
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -105,8 +106,14 @@ def merge_datasets(primary_data: dict, extra_path: str) -> dict:
             "visit_dists": torch.cat([_ensure_visit_dists(a),
                                       _ensure_visit_dists(b)]),
         }
-        if "legal_masks" in a and "legal_masks" in b:
-            merged["legal_masks"] = torch.cat([a["legal_masks"], b["legal_masks"]])
+        if "legal_masks" in a or "legal_masks" in b:
+            # If one side is missing masks, substitute all-ones (0xFF = all bits
+            # set = all moves legal = no masking effect for those positions).
+            a_masks = a.get("legal_masks",
+                            torch.full((len(a["tensors"]), 512), 255, dtype=torch.uint8))
+            b_masks = b.get("legal_masks",
+                            torch.full((len(b["tensors"]), 512), 255, dtype=torch.uint8))
+            merged["legal_masks"] = torch.cat([a_masks, b_masks])
         # Shuffle so batches contain positions from both datasets
         perm = torch.randperm(len(merged["tensors"]))
         return {k: v[perm] for k, v in merged.items()}
@@ -161,6 +168,16 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
         "visit_dists": torch.cat([primary_vd,                         vd]),
     }
 
+    # Preserve legal masks from primary data. Endgame anchors have no precomputed
+    # masks — substitute all-ones (0xFF = all bits set = no masking effect).
+    if "legal_masks" in primary_data["train"]:
+        if "legal_masks" in a:
+            anchor_masks = a["legal_masks"][idx]
+        else:
+            anchor_masks = torch.full((n_sample, 512), 255, dtype=torch.uint8)
+        mixed["legal_masks"] = torch.cat([primary_data["train"]["legal_masks"],
+                                          anchor_masks])
+
     print(f"  anchor positions sampled: {n_sample:,} / {n_anchor:,}")
     print(f"  mixed train size: {len(mixed['tensors']):,}  "
           f"(was {n_primary:,}, +{n_sample:,} anchor)")
@@ -208,12 +225,15 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             value_pred, policy_logits = model(tensors)
             value_pred = value_pred.squeeze(1)
 
-            # Unpack bit-packed legal masks → (B, 4096) bool, then mask logits
+            # Unpack bit-packed legal masks → (B, 4096) bool, then mask logits.
+            # Use numpy.unpackbits (stable since NumPy 1.x) instead of
+            # torch.unpackbits which was only added in PyTorch 1.7.0.
             if legal_masks_packed is not None:
                 B = policy_logits.shape[0]
-                legal_bool = torch.unpackbits(
-                    legal_masks_packed.cpu().reshape(-1)
-                ).reshape(B, 4096).bool().to(device)
+                legal_np = np.unpackbits(
+                    legal_masks_packed.cpu().numpy().reshape(-1)
+                ).reshape(B, 4096)
+                legal_bool = torch.from_numpy(legal_np).bool().to(device)
                 eff_logits = policy_logits.masked_fill(~legal_bool, float("-inf"))
             else:
                 eff_logits = policy_logits
