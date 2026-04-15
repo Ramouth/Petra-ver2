@@ -455,8 +455,10 @@ def train(dataset_path: str = None,
             return tuple(out)
 
         ds = _IndexedSplitDataset(d)
+        # _collate is a closure — cannot be pickled for multiprocessing workers.
+        # All data is already in RAM so num_workers=0 has no cost here.
         loader = DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                            num_workers=num_workers,
+                            num_workers=0,
                             pin_memory=(device.type == "cuda"),
                             collate_fn=_collate)
         return loader, has_batch_vd
