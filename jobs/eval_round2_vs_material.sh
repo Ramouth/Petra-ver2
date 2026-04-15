@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J eval_round2_vs_material
+#BSUB -J eval_feb_sf_vs_material
 #BSUB -q hpc
 #BSUB -n 16
 #BSUB -R "rusage[mem=1GB]"
@@ -10,24 +10,23 @@
 source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
 
-# ELO evaluation: round2 model vs MCTS(material).
-# Baseline to beat: sf_balanced at 58% (ELO +56).
+# ELO evaluation: feb_sf model vs MCTS(material).
+# Baselines (round2 / sf_balanced):
+#   Step 2 (greedy vs random):        sf_balanced 75%
+#   Step 5 (MCTS learned vs material): sf_balanced 58% (ELO +56)
 #
-# Step 2: policy check — full-board training must not break the policy.
-#   sf_balanced scored 75% here. Any drop signals the rank reg is hurting
-#   policy quality and λ should be reduced.
-#
-# Step 5: value gate — must beat material at >55% to justify self-play.
-#   This is the same threshold used throughout. sf_balanced was 58%.
+# Gates for feb_sf:
+#   Step 2 > 70% — policy must survive full-board, draw-inclusive training
+#   Step 5 > 55% — value must beat material heuristic to justify self-play
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
-    --model   /zhome/81/b/206091/Petra-ver2/models/round2/best.pt \
+    --model   /zhome/81/b/206091/Petra-ver2/models/feb_sf/best.pt \
     --step    2 \
     --games   100 \
     --workers 16
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
-    --model   /zhome/81/b/206091/Petra-ver2/models/round2/best.pt \
+    --model   /zhome/81/b/206091/Petra-ver2/models/feb_sf/best.pt \
     --step    5 \
     --n-sim   100 \
     --games   200 \
