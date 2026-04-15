@@ -62,15 +62,23 @@ def load_geometry_vectors(model: PetraNet, dataset_path: str, n: int = 5000):
     return vecs, values
 
 
-def _label_class(v: float) -> str:
+def _label_class(v: float, strict: bool = False) -> str:
     """
     Bucket a STM-relative value into win/draw/loss.
 
-    Uses threshold bucketing rather than exact matching so continuous
-    Stockfish-evaluated values (from zigzag re-labeling) are classified
-    correctly. Exact matching only worked for the three discrete outcome
-    labels (+1, -1, -0.1) from supervised pretraining.
+    strict=False (default): ±0.5 thresholds — works well for discrete ±1
+      outcome labels (old supervised datasets).
+
+    strict=True: ±0.7 win/loss, ±0.3 draw, with a "unclear" middle band
+      discarded.  Use for continuous SF-labelled datasets (e.g.
+      dataset_feb_sf.pt) where many positions cluster in the 0.3–0.5
+      range and inflate the "draw" bucket with near-wins/losses.
     """
+    if strict:
+        if v >  0.7: return "win"
+        if v < -0.7: return "loss"
+        if abs(v) < 0.3: return "draw"
+        return "unclear"
     if v > 0.5:  return "win"
     if v < -0.5: return "loss"
     return "draw"
@@ -176,28 +184,51 @@ def check_label_separation(vecs: np.ndarray, values: np.ndarray):
     print("CHECK 2 — Win / draw / loss separation")
     print("="*60)
 
+    # Broad buckets (±0.5): comparable across all dataset types
     labels = np.array([_label_class(v) for v in values])
+    # Strict buckets (±0.7/±0.3): better for continuous SF labels —
+    # removes the ambiguous 0.3–0.7 band that inflates the draw count
+    # and drags win·draw cosine up artificially.
+    strict_labels = np.array([_label_class(v, strict=True) for v in values])
+    n_unclear = (strict_labels == "unclear").sum()
+
     win_vecs  = vecs[labels == "win"]
     loss_vecs = vecs[labels == "loss"]
     draw_vecs = vecs[labels == "draw"]
 
-    print(f"  Samples — win: {len(win_vecs)}, draw: {len(draw_vecs)}, loss: {len(loss_vecs)}")
+    print(f"  Samples (broad ±0.5)  — win: {len(win_vecs)}, draw: {len(draw_vecs)}, "
+          f"loss: {len(loss_vecs)}")
+    win_vecs_s  = vecs[strict_labels == "win"]
+    loss_vecs_s = vecs[strict_labels == "loss"]
+    draw_vecs_s = vecs[strict_labels == "draw"]
+    print(f"  Samples (strict ±0.7) — win: {len(win_vecs_s)}, draw: {len(draw_vecs_s)}, "
+          f"loss: {len(loss_vecs_s)}  ({n_unclear} unclear discarded)")
 
     if len(win_vecs) == 0 or len(loss_vecs) == 0:
         print("  SKIPPED — insufficient win/loss samples for separation check")
         return
 
-    # Centroids
+    # Centroids (broad buckets — for cross-run comparability)
     c_win  = win_vecs.mean(axis=0)
     c_loss = loss_vecs.mean(axis=0)
     c_draw = draw_vecs.mean(axis=0) if len(draw_vecs) > 0 else None
 
     win_loss_sim  = cosine_sim(c_win, c_loss)
-    print(f"\n  Centroid cosine similarities:")
+    print(f"\n  Centroid cosine similarities (broad ±0.5 buckets):")
     print(f"    win  · loss  = {win_loss_sim:.4f}  (lower = better separation)")
     if c_draw is not None:
         print(f"    win  · draw  = {cosine_sim(c_win,  c_draw):.4f}")
         print(f"    loss · draw  = {cosine_sim(c_loss, c_draw):.4f}")
+
+    # Repeat with strict buckets — removes the 0.3–0.7 ambiguous band
+    if len(win_vecs_s) > 0 and len(loss_vecs_s) > 0 and len(draw_vecs_s) > 0:
+        cs_win  = win_vecs_s.mean(axis=0)
+        cs_loss = loss_vecs_s.mean(axis=0)
+        cs_draw = draw_vecs_s.mean(axis=0)
+        print(f"  Centroid cosine similarities (strict ±0.7/±0.3 buckets):")
+        print(f"    win  · loss  = {cosine_sim(cs_win, cs_loss):.4f}")
+        print(f"    win  · draw  = {cosine_sim(cs_win,  cs_draw):.4f}  ← draw-dimension signal")
+        print(f"    loss · draw  = {cosine_sim(cs_loss, cs_draw):.4f}")
 
     # Within-class vs between-class distances (sample 500 per class)
     rng = np.random.default_rng(42)
@@ -248,7 +279,7 @@ def check_known_positions(model: PetraNet, c_win: np.ndarray, c_loss: np.ndarray
         ("Starting position",           chess.Board()),
         ("KQ vs K — White to move",     chess.Board("4k3/8/8/8/8/8/8/4K2Q w - - 0 1")),
         ("KQ vs K — Black to move",     chess.Board("4k3/8/8/8/8/8/8/4K2Q b - - 0 1")),
-        ("Equal endgame (KR vs KR)",    chess.Board("4k3/8/8/8/8/8/8/R3K2R w - - 0 1")),
+        ("Equal endgame (KR vs KR)",    chess.Board("8/8/3k4/8/8/3K4/8/1R2r3 w - - 0 1")),
         ("White queen up",              chess.Board("4k3/8/8/8/8/8/8/Q3K3 w - - 0 1")),
         ("Black queen up",              chess.Board("4K3/8/8/8/8/8/8/q3k3 w - - 0 1")),
         ("Complex middlegame",          chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")),
