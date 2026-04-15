@@ -6,13 +6,17 @@ fixed depth, replaces game-outcome labels with engine evaluations, and saves
 a new dataset_sf.pt ready for training.
 
 Label convention (matches training pipeline):
-  Stockfish centipawn eval is converted to the side-to-move perspective
-  and squashed through tanh(cp / 400) → range (-1, +1).
+  Stockfish centipawn eval is already in the side-to-move perspective
+  by UCI protocol — no flip is applied here. Squashed through
+  tanh(cp / 400) → range (-1, +1).
   +1 = side to move is winning decisively
    0 = equal
   -1 = side to move is losing decisively
 
   Mate scores: mapped to ±1.0 directly.
+
+  Note: "STM-relative" fixes in board.py and data.py apply to board tensor
+  encoding and move indexing. They are unrelated to SF score convention.
 
 Why tanh(cp / 400)?
   400cp is roughly one piece advantage. tanh saturates gracefully so a
@@ -119,6 +123,10 @@ class Stockfish:
                 if len(parts) > 1:
                     bestmove = parts[1]
 
+        # UCI protocol guarantees score cp/mate is always from the side-to-move's
+        # perspective — Stockfish flips internally. No Python-level flip is needed
+        # or correct here. "STM-relative" fixes elsewhere (board.py, data.py) are
+        # about board tensor encoding and move indexing, not SF score convention.
         if mate is not None:
             return (1.0 if mate > 0 else -1.0), bestmove
         if cp is not None:

@@ -201,9 +201,9 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
 # ---------------------------------------------------------------------------
 
 def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = False,
-              policy_weight: float = 1.0):
+              policy_weight: float = 1.0, rank_reg: float = 0.0):
     model.train(is_train)
-    total_loss = total_vloss = total_ploss = 0.0
+    total_loss = total_vloss = total_ploss = total_rloss = 0.0
     total_grad_norm = 0.0
     n_batches = 0
     all_value_preds, all_value_targets = [], []
@@ -233,7 +233,15 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             values    = values.to(device)
             move_idxs = move_idxs.to(device)
 
-            value_pred, policy_logits = model(tensors)
+            # When rank_reg is active, route through _geometry_fwd so we
+            # get the geometry tensor without a second forward pass.
+            if rank_reg > 0:
+                g          = model._geometry_fwd(tensors)
+                value_pred = model.value_head(g)
+                policy_logits = model.policy_head(g)
+            else:
+                value_pred, policy_logits = model(tensors)
+                g = None
             value_pred = value_pred.squeeze(1)
 
             if legal_bool is not None:
@@ -259,6 +267,18 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
                 ploss = F.cross_entropy(eff_logits, move_idxs)
             loss  = vloss + policy_weight * ploss
 
+            # Rank regularisation — penalise eigenvalue concentration.
+            # Vectors are L2-normalised so tr(C) = 1 always.
+            # Loss = tr(C²) = ||C||_F²  ∈ [1/128, 1].
+            # Minimising this maximises effective rank (= 1/tr(C²)).
+            # λ=0.1 adds ~0.007 to loss when rank=7 — small but directional.
+            if rank_reg > 0 and g is not None:
+                C = g.T @ g / g.shape[0]
+                rloss = (C * C).sum()
+                loss  = loss + rank_reg * rloss
+            else:
+                rloss = torch.zeros(1, device=device)
+
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -269,6 +289,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             total_loss  += loss.item()
             total_vloss += vloss.item()
             total_ploss += ploss.item()
+            total_rloss += rloss.item()
             n_batches   += 1
 
             # Accumulate for R² and accuracy
@@ -290,6 +311,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
         "loss":       total_loss  / n_batches,
         "value_loss": total_vloss / n_batches,
         "policy_loss":total_ploss / n_batches,
+        "rank_loss":  total_rloss / n_batches,
         "value_r2":   r2,
         "top1":       policy_correct_top1 / policy_total,
         "top5":       policy_correct_top5 / policy_total,
@@ -316,7 +338,8 @@ def train(dataset_path: str = None,
           endgame_positions: int = 0,
           endgame_stages=None,
           num_workers: int = 0,
-          deterministic: bool = False):
+          deterministic: bool = False,
+          rank_reg: float = 0.0):
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -408,10 +431,15 @@ def train(dataset_path: str = None,
         epochs_no_improve = ckpt.get("epochs_no_improve", 0)
         print(f"Resumed from {resume}  (epoch {ckpt['epoch']}, best_val={best_val_loss:.4f})")
 
+    if rank_reg > 0:
+        print(f"Rank regularisation: λ={rank_reg}  "
+              f"(tr(C²) penalty — maximises effective rank)")
     print(f"Patience: {patience} (tight={tight_patience} after >{transition_drop*100:.0f}% val drop)\n")
+    rank_col = f"  {'RankL':>6}" if rank_reg > 0 else ""
     print(f"{'Epoch':>5}  {'T-loss':>7}  {'V-loss':>7}  {'V-MSE':>6}  "
-          f"{'V-R²':>6}  {'Top1':>5}  {'Top5':>5}  {'LR':>8}  {'GNorm':>6}")
-    print("-" * 73)
+          f"{'V-R²':>6}  {'Top1':>5}  {'Top5':>5}  {'LR':>8}  {'GNorm':>6}"
+          + rank_col)
+    print("-" * (73 + (9 if rank_reg > 0 else 0)))
 
     for epoch in range(start_epoch, epochs + 1):
         t0 = time.time()
@@ -423,9 +451,11 @@ def train(dataset_path: str = None,
             val_loader   = _make_loader(data, "val",   shuffle=False)
 
         train_m = run_epoch(model, train_loader, optimizer, is_train=True,
-                            dense_policy=dense_policy, policy_weight=policy_weight)
+                            dense_policy=dense_policy, policy_weight=policy_weight,
+                            rank_reg=rank_reg)
         val_m   = run_epoch(model, val_loader,   optimizer, is_train=False,
-                            dense_policy=dense_policy, policy_weight=policy_weight)
+                            dense_policy=dense_policy, policy_weight=policy_weight,
+                            rank_reg=rank_reg)
 
         scheduler.step(val_m["loss"])
         lr_now  = optimizer.param_groups[0]["lr"]
@@ -442,6 +472,7 @@ def train(dataset_path: str = None,
 
         prev_val_loss = val_m["loss"]
 
+        rank_str = f"  {val_m['rank_loss']:>6.4f}" if rank_reg > 0 else ""
         print(f"{epoch:>5}  "
               f"{train_m['loss']:>7.4f}  "
               f"{val_m['loss']:>7.4f}  "
@@ -450,8 +481,9 @@ def train(dataset_path: str = None,
               f"{val_m['top1']:>5.3f}  "
               f"{val_m['top5']:>5.3f}  "
               f"{lr_now:>8.2e}  "
-              f"{train_m['grad_norm']:>6.3f}  "
-              f"({elapsed:.0f}s)")
+              f"{train_m['grad_norm']:>6.3f}"
+              + rank_str +
+              f"  ({elapsed:.0f}s)")
 
         # Topological health check every 2 epochs (epochs 1, 3, 5, ...)
         if epoch % topo_check_every == 1:
@@ -580,6 +612,12 @@ def main():
     ap.add_argument("--deterministic", action="store_true",
                     help="Enable cuDNN deterministic mode for reproducibility "
                          "(slightly slower). Also seeds numpy and random.")
+    ap.add_argument("--rank-reg", type=float, default=0.0,
+                    help="Rank regularisation weight λ (default: 0). "
+                         "Adds λ·tr(C²) to the loss to penalise eigenvalue "
+                         "concentration and push effective rank higher. "
+                         "Try 0.05–0.2. tr(C²) ≈ 1/eff_rank so at rank=7 "
+                         "the penalty adds ~λ·0.14.")
     args = ap.parse_args()
 
     if args.dataset is None and args.endgame_positions == 0:
@@ -606,6 +644,7 @@ def main():
         num_workers=args.num_workers,
         resume=args.resume,
         deterministic=args.deterministic,
+        rank_reg=args.rank_reg,
     )
 
 

@@ -608,6 +608,29 @@ def main():
                     help="Path to original dataset.pt (game outcomes) for step 6 geometry probe.")
     args = ap.parse_args()
 
+    # Header — printed first so every log file is self-describing from line 1.
+    import datetime
+    steps_to_run = list(ABLATION_STEPS.keys()) if args.all_steps else \
+                   [args.step] if args.step else [5]
+    step_descs   = ", ".join(f"{s}:{ABLATION_STEPS[s][0]}" for s in steps_to_run
+                             if s in ABLATION_STEPS)
+    opponent_str = (f"MCTS(baseline={args.baseline_model})"
+                    if args.baseline_model else "MCTS(material)")
+    print("=" * 56)
+    print("PETRA EVALUATION")
+    print("=" * 56)
+    print(f"  Model    : {args.model or '(none)'}")
+    if args.baseline_model:
+        print(f"  Baseline : {args.baseline_model}")
+    print(f"  Steps    : {step_descs}")
+    print(f"  Games    : {args.games}")
+    print(f"  N-sim    : {args.n_sim}")
+    print(f"  Opponent : {opponent_str}")
+    print(f"  Workers  : {args.workers}")
+    print(f"  Date     : {datetime.date.today()}")
+    print("=" * 56)
+    print()
+
     model = None
     if args.model:
         model = PetraNet().to(device)

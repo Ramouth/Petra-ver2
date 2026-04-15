@@ -130,13 +130,25 @@ The sections below are retained as project history. They describe how Petra
 reached the current doover, but they are no longer the authoritative statement
 of purpose or gating.
 
+### Terminology
+
+- **Session** — a block of work time (roughly a conversation/day). Sessions are
+  numbered continuously across the whole project history.
+- **Round** — one training run producing one named model checkpoint
+  (configure → train → probe → gate). Rounds reset to 1 at each doover.
+- **Doover** — a fundamental restart: new architecture, new data strategy, or
+  both. Old model weights are not carried forward. Marked explicitly in session
+  headers. Round numbering restarts from 1.
+
+---
+
 ## Context
 
 Phase 0 (2026-03-20 to 2026-03-24) failed. The geometry encoder (walk profile → contrastive loss → 128-dim space → value) cannot be trained on correct chess data — contrastive loss collapses because most middlegame positions have near-identical values. The v6 encoder that appeared to work was exploiting a sign-error bug in training data, not learning chess geometry.
 
 Phase 0 end state: Petra = Maia-1500 policy + near-constant value function. Strictly worse than Maia-1500 greedy alone.
 
-**Phase 1 thesis:** Replace the geometry encoder with a direct supervised value+policy network (PetraNet) trained on Lichess game outcomes. Validate with ELO before anything else. Build on what works.
+**Phase 1 thesis (⟳ DOOVER 1):** Replace the geometry encoder with a direct supervised value+policy network (PetraNet) trained on Lichess game outcomes. Validate with ELO before anything else. Build on what works. *Rounds reset to 1.*
 
 ---
 
@@ -457,9 +469,12 @@ To run after gate: `compare_geometry.py` with R6 vs R2/R4 on `selfplay_r1_full_s
 
 ---
 
-## Session 8 — Doover: Endgame Curriculum + SF Lichess (2026-04-09)
+## Session 8 — ⟳ DOOVER 2: Endgame Curriculum + SF Lichess (2026-04-09)
 
-### Endgame stage 1+2 result
+*Rounds reset. Previous best model (R4, 67% vs material) retired.*
+*Motivation: ReLU bottleneck prevents antipodal geometry. New approach: Tanh bottleneck + endgame curriculum + SF-Lichess broad training.*
+
+### Round 1 — Endgame curriculum (stage 1+2)
 
 Trained from scratch (Tanh bottleneck) on 20k KQ vs K + KR vs K positions with antipodal mirrors, 20 epochs, value-only (policy weight=0), regenerating positions each epoch to prevent memorisation.
 
@@ -478,6 +493,27 @@ Trained from scratch (Tanh bottleneck) on 20k KQ vs K + KR vs K positions with a
 **Interpretation:** The geometry mechanism works — antipodal separation is achievable and the endgame curriculum forces it cleanly. However, the training signal is binary (one side always has the winning piece, no draws, no gradations) so the model learned a single win/loss axis. Effective rank 1.0/128 means 127 dimensions are unused. The centroid cosine and separation gap look perfect but are trivially so — two perfectly separated clusters with no internal variation.
 
 **Decision:** Skip the remaining endgame stages (3–8). They would expand rank from 1 to maybe 5 but the distribution is still too narrow. The correct next step is SF-labeled Lichess data with continuous labels — hundreds of material configurations simultaneously — mixed with endgame anchors (15%) to keep the win/loss axis grounded.
+
+### Round 2 — sf_balanced (SF-Lichess + endgame anchors)
+
+*Model: `models/sf_balanced/best.pt`*
+
+Dataset: `dataset_sf.pt` (max_pieces=20, decisive) merged with `dataset_balanced.pt` (max_pieces=32, min_decisive=0.05) + 15% endgame anchors (KQK + KRK).
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Step 2 Greedy vs Random | **75%** ✓ |
+| Step 5 vs MCTS(material) | **58% (+56 ELO)** ✓ |
+| Effective rank | **7.2 / 128** ✗ (target >30) |
+| Centroid cosine (win·loss) | **0.0802** ✓ (was 0.869 in R4) |
+| Separation gap | **0.2014** ✓ (was 0.048 in R4) |
+| Draw cluster (win·draw) | 0.2657 — draws loss-adjacent, no separate axis |
+| β1 topology loops | 121 — healthy non-trivial structure |
+| Geometry MCTS (Step 6) | **29.2%** ✗ — passenger problem persists |
+
+All sanity checks pass. Starting position mislabelled as "loss" — caused by max_pieces=20 training making full-board positions OOD.
 
 ### Doover architecture decisions confirmed
 - **Tanh bottleneck**: confirmed correct, antipodal geometry achievable
@@ -517,6 +553,56 @@ python3 src/probe_geometry.py --model ~/Petra-ver2/models/sf_gpu/best.pt --datas
 
 ---
 
+## Session 9 — Geometry analysis + Round 3/4 plan (2026-04-15)
+
+### Round 3 — zigzag r1 (self-play from sf_balanced)
+
+*Model: `models/zigzag/r1/best.pt`*
+
+One round of self-play (500 games, n_sim=40, SF depth 12) starting from sf_balanced. Opening book used to skip biased first moves. 20% endgame anchor mix during training.
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Step 5 vs sf_balanced (head-to-head) | **51.2% (+9 ELO)** |
+| Step 5 vs MCTS(material) | **~59% est.** |
+| Geometry MCTS (Step 6) | **28.0%** ✗ — passenger problem unchanged |
+| Probe R² (geometry→outcome) | 0.84 — geometry has signal but not directional |
+
+Self-play did not regress. Gain is marginal (+9 ELO over sf_balanced). Geometry rank not probed separately; Step 6 result confirms no improvement in directional structure.
+
+**Diagnosis:** Rank 7.2 is the bottleneck. The value head compensates for weak geometry, so self-play has no pressure to improve it. More rounds of zigzag from this base are not worth running until geometry rank improves.
+
+### Round 4 — train_round2 (full pieces + rank regularisation) — PENDING
+
+*Model: `models/round2/best.pt` (not yet trained)*
+
+*Script: `jobs/train_round2_gpu.sh`*
+
+Changes from Round 2 (sf_balanced):
+- Primary dataset: `dataset_balanced.pt` only (max_pieces=32, draws included) — no max_pieces=20 restriction. Fixes starting-position OOD problem.
+- Cold start — sf_balanced's 7D subspace may be a local attractor.
+- `--rank-reg 0.1`: adds λ·tr(C²) to loss. At rank=7.2 this adds ~0.014/batch — direct gradient toward rank expansion. Also pushes draw cluster off win/loss axis.
+- `--anchor-frac 0.20` (up from 0.15) to keep win/loss axis oriented as rank expands.
+
+**Gates:**
+- Step 2 Greedy vs Random > 70% (full-board training must not break policy)
+- Step 5 vs MCTS(material) > 55% (baseline: sf_balanced at 58%)
+- Effective rank > 15 (stretch: > 30)
+- win·draw cosine should drop below 0.20 (draw dimension opening)
+
+*Run order: `bsub < jobs/train_round2_gpu.sh` → probe_geometry → eval_round2_vs_material*
+
+### Code changes this session
+
+- `train.py`: `--rank-reg λ` flag. Adds λ·tr(C²) loss term via `_geometry_fwd()`. RankL column in training output.
+- `evaluate.py`: self-describing header printed at start of every eval log (model, steps, games, n_sim, opponent, date).
+- `reeval_stockfish.py`: clarifying comments that UCI `score cp` is already STM-relative — no flip needed or correct. Distinct from STM fixes in board.py/data.py.
+- New jobs: `eval_round2_vs_material.sh`, `train_round2_gpu.sh`.
+
+---
+
 ## Milestones
 
 ### ELO
@@ -527,11 +613,12 @@ python3 src/probe_geometry.py --model ~/Petra-ver2/models/sf_gpu/best.pt --datas
 - [ ] Beat Stockfish depth 5
 
 ### Geometry (the thesis)
-- [x] Win/loss centroid cosine < 0.85 — *R4: 0.869*
-- [x] Win/loss centroid cosine < 0.00 — *Endgame stage 1+2: -0.9999*
-- [x] KQ vs K AND K vs KQ both correct — *Endgame stage 1+2: both ✓*
-- [ ] Effective rank > 30 — *currently 1.0/128 (endgame only)*
-- [ ] Separation gap > 0.10 with rank > 30 — *gap trivially 2.0 but rank collapsed*
+- [x] Win/loss centroid cosine < 0.85 — *Doover 2 R2 (sf_balanced): 0.0802*
+- [x] Win/loss centroid cosine < 0.00 — *Doover 2 R1 (endgame): -0.9999*
+- [x] KQ vs K AND K vs KQ both correct — *Doover 2 R2 (sf_balanced): both ✓*
+- [ ] Effective rank > 30 — *Doover 2 R2: 7.2/128*
+- [ ] Draw dimension: win·draw cosine < 0.10 — *currently 0.2657*
+- [ ] Separation gap > 0.10 with rank > 30 — *gap 0.2014 but rank still low*
 
 ### Self-play
 - [x] 1k self-play positions trained

@@ -48,13 +48,9 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from board import board_to_tensor, outcome_to_value, move_to_index
 
-# Positions to skip at the start of each game (opening book noise)
+# Defaults — all overridable via CLI
 SKIP_OPENING_MOVES = 10
-
-# Maximum positions sampled per game (prevents one long game dominating)
 MAX_POSITIONS_PER_GAME = 8
-
-# Minimum game length to include (very short games are usually abandoned)
 MIN_GAME_MOVES = 15
 
 # Maximum game length (runaway games add noise)
@@ -104,7 +100,10 @@ def _open_pgn(path: str):
 
 
 def _iter_games(pgn_path: str, max_games: int, min_elo: int,
-                require_normal_termination: bool, rng: random.Random):
+                require_normal_termination: bool, rng: random.Random,
+                skip_opening: int = SKIP_OPENING_MOVES,
+                positions_per_game: int = MAX_POSITIONS_PER_GAME,
+                sampling: str = "random"):
     """
     Generator. Yields (game_id, result, [(board, move), ...]) for each
     accepted game. Applies all game-level filters inline.
@@ -148,12 +147,24 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 games_skipped += 1
                 continue
 
-            candidates = list(range(SKIP_OPENING_MOVES, n))
+            candidates = list(range(skip_opening, n))
             if not candidates:
                 games_skipped += 1
                 continue
 
-            sampled = rng.sample(candidates, min(MAX_POSITIONS_PER_GAME, len(candidates)))
+            if sampling == "even":
+                # Evenly spaced across the game arc — guarantees positions from
+                # opening, middlegame, and endgame in every game.
+                k = min(positions_per_game, len(candidates))
+                if k == 1:
+                    indices = [candidates[0]]
+                else:
+                    step = (len(candidates) - 1) / (k - 1)
+                    indices = [candidates[round(i * step)] for i in range(k)]
+                sampled = sorted(set(indices))
+            else:
+                sampled = rng.sample(candidates, min(positions_per_game, len(candidates)))
+
             yield games_parsed, result, [(i, pairs[i][0], pairs[i][1]) for i in sampled]
 
             games_parsed += 1
@@ -163,7 +174,10 @@ def parse_pgn(pgn_path: str,
               max_games: int = 200_000,
               min_elo: int = 0,
               require_normal_termination: bool = True,
-              seed: int = 42) -> List[Position]:
+              seed: int = 42,
+              skip_opening: int = SKIP_OPENING_MOVES,
+              positions_per_game: int = MAX_POSITIONS_PER_GAME,
+              sampling: str = "random") -> List[Position]:
     """
     Stream a PGN file and return a list of Position objects.
 
@@ -176,11 +190,12 @@ def parse_pgn(pgn_path: str,
       500k games → ~4M positions   → ~4.3GB
     """
     rng = random.Random(seed)
-    max_positions = max_games * MAX_POSITIONS_PER_GAME
+    max_positions = max_games * positions_per_game
 
     # Estimate and report memory
     mb = max_positions * (14 * 8 * 8) / 1024 / 1024
     print(f"Parsing {pgn_path} (max_games={max_games:,}) ...")
+    print(f"  skip_opening={skip_opening}  positions_per_game={positions_per_game}  sampling={sampling}")
     print(f"Pre-allocating ~{mb:.0f} MB for up to {max_positions:,} positions ...")
 
     # Pre-allocate as uint8 — board values are binary (0/1)
@@ -195,7 +210,9 @@ def parse_pgn(pgn_path: str,
     t0 = time.time()
 
     for game_id, result, sampled_pairs in _iter_games(
-            pgn_path, max_games, min_elo, require_normal_termination, rng):
+            pgn_path, max_games, min_elo, require_normal_termination, rng,
+            skip_opening=skip_opening, positions_per_game=positions_per_game,
+            sampling=sampling):
 
         for ply, b, move in sampled_pairs:
             tensor_buf[count]   = board_to_tensor(b).numpy().astype(np.uint8)
@@ -419,7 +436,10 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
 def split_and_save(positions: List[Position],
                    out_path: str,
                    val_fraction: float = VAL_FRACTION,
-                   seed: int = 42):
+                   seed: int = 42,
+                   skip_opening: int = SKIP_OPENING_MOVES,
+                   positions_per_game: int = MAX_POSITIONS_PER_GAME,
+                   sampling: str = "random"):
     """
     Split at game level (no leakage), validate val set for duplicates,
     and save to disk with a metadata sidecar.
@@ -470,8 +490,9 @@ def split_and_save(positions: List[Position],
             "val_fraction":    val_fraction,
             "label_values":    list(VALID_LABEL_VALUES),
             "draw_value":      -0.1,
-            "skip_opening":    SKIP_OPENING_MOVES,
-            "max_per_game":    MAX_POSITIONS_PER_GAME,
+            "skip_opening":    skip_opening,
+            "max_per_game":    positions_per_game,
+            "sampling":        sampling,
             "n_val_dupes":     n_val_dupes,
             "n_fen_overlap":   len(overlap),
         },
@@ -505,6 +526,16 @@ def main():
     ap.add_argument("--seed",          type=int, default=42)
     ap.add_argument("--no-strict",     action="store_true",
                     help="Warn on validation failures instead of raising")
+    ap.add_argument("--positions-per-game", type=int, default=MAX_POSITIONS_PER_GAME,
+                    help=f"Positions sampled per game (default: {MAX_POSITIONS_PER_GAME}). "
+                         "Increase for better game-arc coverage.")
+    ap.add_argument("--skip-opening",  type=int, default=SKIP_OPENING_MOVES,
+                    help=f"Half-moves to skip at game start (default: {SKIP_OPENING_MOVES}). "
+                         "Lower = include earlier positions.")
+    ap.add_argument("--sampling",      choices=["random", "even"], default="random",
+                    help="'random': sample uniformly at random (default). "
+                         "'even': evenly spaced across game arc — guarantees "
+                         "positions from opening, middlegame, and endgame.")
     args = ap.parse_args()
 
     positions = parse_pgn(
@@ -513,6 +544,9 @@ def main():
         min_elo=args.min_elo,
         require_normal_termination=not args.no_termination_filter,
         seed=args.seed,
+        skip_opening=args.skip_opening,
+        positions_per_game=args.positions_per_game,
+        sampling=args.sampling,
     )
 
     if not positions:
@@ -522,7 +556,10 @@ def main():
     validate_dataset(positions, strict=not args.no_strict)
 
     if not args.validate_only:
-        split_and_save(positions, args.out, seed=args.seed)
+        split_and_save(positions, args.out, seed=args.seed,
+                       skip_opening=args.skip_opening,
+                       positions_per_game=args.positions_per_game,
+                       sampling=args.sampling)
 
 
 if __name__ == "__main__":
