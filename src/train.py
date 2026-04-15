@@ -31,7 +31,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import PetraNet
@@ -158,20 +158,26 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
     # For supervised SF anchors (no visit_dists), build one-hot from move_idxs.
     # This avoids injecting arbitrary one-hot policy targets into endgame positions
     # where move_idxs is just the first legal move (meaningless for policy training).
-    if "visit_dists" in a:
+    anchor_has_vd = "visit_dists" in a
+    if anchor_has_vd:
         vd = a["visit_dists"][idx]
     else:
         a_sampled_idxs = a["move_idxs"][idx]
         vd = torch.zeros(n_sample, 4096, dtype=torch.float32)
         vd[torch.arange(n_sample), a_sampled_idxs] = 1.0
 
-    primary_vd = _ensure_visit_dists(primary_data["train"])
     mixed = {
         "tensors":     torch.cat([primary_data["train"]["tensors"],   a["tensors"][idx]]),
         "values":      torch.cat([primary_data["train"]["values"],    a["values"][idx]]),
         "move_idxs":   torch.cat([primary_data["train"]["move_idxs"], a["move_idxs"][idx]]),
-        "visit_dists": torch.cat([primary_vd,                         vd]),
     }
+    if "visit_dists" in primary_data["train"]:
+        mixed["visit_dists"] = torch.cat([primary_data["train"]["visit_dists"], vd])
+    elif anchor_has_vd:
+        # Keep anchor dense policy targets separate so large supervised primaries
+        # do not require materialising a full (N, 4096) one-hot tensor in RAM.
+        mixed["anchor_visit_dists"] = vd
+        mixed["anchor_offset"] = n_primary
 
     # Preserve legal masks when available from either side.
     # If one side is missing masks, substitute all-ones (0xFF = all bits
@@ -196,12 +202,30 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
     return result
 
 
+class _IndexedSplitDataset(Dataset):
+    """Dataset wrapper that preserves row indices for batch-time policy target assembly."""
+
+    def __init__(self, split: dict):
+        self.split = split
+
+    def __len__(self):
+        return len(self.split["tensors"])
+
+    def __getitem__(self, idx: int):
+        d = self.split
+        item = [idx, d["tensors"][idx], d["values"][idx], d["move_idxs"][idx]]
+        if "legal_masks" in d:
+            item.append(d["legal_masks"][idx])
+        return tuple(item)
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
 def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = False,
-              policy_weight: float = 1.0, rank_reg: float = 0.0):
+              policy_weight: float = 1.0, rank_reg: float = 0.0,
+              has_stored_vd: bool = True):
     model.train(is_train)
     total_loss = total_vloss = total_ploss = total_rloss = 0.0
     total_grad_norm = 0.0
@@ -212,26 +236,46 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for batch in loader:
-            # 5th element is pre-unpacked (N, 4096) bool — see _make_loader.
-            if dense_policy:
+            # Batch layout (see _make_loader for construction):
+            #   has_stored_vd=True,  legal_masks: (tensors, values, move_idxs, visit_dists, packed_masks)
+            #   has_stored_vd=True,  no masks:    (tensors, values, move_idxs, visit_dists)
+            #   has_stored_vd=False, legal_masks: (tensors, values, move_idxs, packed_masks)
+            #   has_stored_vd=False, no masks:    (tensors, values, move_idxs)
+            # legal_masks are kept packed (N, 512) uint8 and unpacked here per batch
+            # to avoid a (N, 4096) bool tensor at load time (~1.5 GiB for 380k positions).
+            if dense_policy and has_stored_vd:
                 if len(batch) == 5:
-                    tensors, values, move_idxs, visit_dists, legal_bool = batch
-                    legal_bool = legal_bool.to(device)
+                    tensors, values, move_idxs, visit_dists, packed_masks = batch
                 else:
                     tensors, values, move_idxs, visit_dists = batch
-                    legal_bool = None
+                    packed_masks = None
                 visit_dists = visit_dists.to(device)
             else:
                 if len(batch) == 4:
-                    tensors, values, move_idxs, legal_bool = batch
-                    legal_bool = legal_bool.to(device)
+                    tensors, values, move_idxs, packed_masks = batch
                 else:
                     tensors, values, move_idxs = batch
-                    legal_bool = None
+                    packed_masks = None
+
+            # Unpack legal masks per batch
+            if packed_masks is not None:
+                bs = packed_masks.shape[0]
+                legal_bool = torch.from_numpy(
+                    np.unpackbits(packed_masks.numpy().reshape(-1))
+                    .reshape(bs, 4096)
+                ).bool().to(device)
+            else:
+                legal_bool = None
 
             tensors   = tensors.float().to(device)   # uint8 → float32
             values    = values.to(device)
             move_idxs = move_idxs.to(device)
+
+            # For SF supervised data without stored visit_dists, build one-hot per batch.
+            # This avoids materialising a (N, 4096) float32 tensor at load time
+            # (~5.8 GiB for 380k positions).
+            if dense_policy and not has_stored_vd:
+                visit_dists = F.one_hot(move_idxs, 4096).float()
 
             # When rank_reg is active, route through _geometry_fwd so we
             # get the geometry tensor without a second forward pass.
@@ -380,22 +424,45 @@ def train(dataset_path: str = None,
 
     def _make_loader(data, split, shuffle):
         d = data[split]
-        tensors_list = [d["tensors"], d["values"], d["move_idxs"], _ensure_visit_dists(d)]
-        if "legal_masks" in d:
-            # Pre-unpack once at loader creation: (N, 512) uint8 → (N, 4096) bool.
-            # Avoids a numpy CPU round-trip on every batch during training.
-            unpacked = torch.from_numpy(
-                np.unpackbits(d["legal_masks"].numpy().reshape(-1))
-                .reshape(len(d["tensors"]), 4096)
-            ).bool()
-            tensors_list.append(unpacked)
-        ds = TensorDataset(*tensors_list)
-        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                          num_workers=num_workers,
-                          pin_memory=(device.type == "cuda"))
+        has_batch_vd = ("visit_dists" in d) or ("anchor_visit_dists" in d)
 
-    train_loader = _make_loader(data, "train", shuffle=True)
-    val_loader   = _make_loader(data, "val",   shuffle=False)
+        def _collate(batch):
+            idxs = torch.tensor([row[0] for row in batch], dtype=torch.long)
+            tensors = torch.stack([row[1] for row in batch])
+            values = torch.stack([row[2] for row in batch])
+            move_idxs = torch.stack([row[3] for row in batch])
+
+            packed_masks = None
+            if "legal_masks" in d:
+                packed_masks = torch.stack([row[4] for row in batch])
+
+            if "visit_dists" in d:
+                visit_dists = d["visit_dists"][idxs]
+            elif "anchor_visit_dists" in d:
+                visit_dists = F.one_hot(move_idxs, 4096).float()
+                anchor_rows = idxs >= d["anchor_offset"]
+                if anchor_rows.any():
+                    anchor_local = idxs[anchor_rows] - d["anchor_offset"]
+                    visit_dists[anchor_rows] = d["anchor_visit_dists"][anchor_local]
+            else:
+                visit_dists = None
+
+            out = [tensors, values, move_idxs]
+            if visit_dists is not None:
+                out.append(visit_dists)
+            if packed_masks is not None:
+                out.append(packed_masks)
+            return tuple(out)
+
+        ds = _IndexedSplitDataset(d)
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                            num_workers=num_workers,
+                            pin_memory=(device.type == "cuda"),
+                            collate_fn=_collate)
+        return loader, has_batch_vd
+
+    train_loader, has_stored_vd = _make_loader(data, "train", shuffle=True)
+    val_loader, _               = _make_loader(data, "val",   shuffle=False)
 
     model = PetraNet().to(device)
     if init_model:
@@ -447,15 +514,15 @@ def train(dataset_path: str = None,
         # Regenerate endgame positions each epoch — prevents memorisation
         if regenerate and epoch > 1:
             data = _fresh_endgame_data()
-            train_loader = _make_loader(data, "train", shuffle=True)
-            val_loader   = _make_loader(data, "val",   shuffle=False)
+            train_loader, has_stored_vd = _make_loader(data, "train", shuffle=True)
+            val_loader, _               = _make_loader(data, "val",   shuffle=False)
 
         train_m = run_epoch(model, train_loader, optimizer, is_train=True,
                             dense_policy=dense_policy, policy_weight=policy_weight,
-                            rank_reg=rank_reg)
+                            rank_reg=rank_reg, has_stored_vd=has_stored_vd)
         val_m   = run_epoch(model, val_loader,   optimizer, is_train=False,
                             dense_policy=dense_policy, policy_weight=policy_weight,
-                            rank_reg=rank_reg)
+                            rank_reg=rank_reg, has_stored_vd=has_stored_vd)
 
         scheduler.step(val_m["loss"])
         lr_now  = optimizer.param_groups[0]["lr"]
@@ -539,12 +606,19 @@ def _sanity_check(model: PetraNet):
     print("\nPost-training sanity checks:")
     model.eval()
 
+    DRAW_THRESHOLD = 0.35  # equal endgame should be within this of 0
+
     tests = [
-        ("Start position",          chess.Board(),                          None),
+        # (name, board, expected)
+        # expected=None → unchecked (just print), positive/negative → sign check,
+        # "draw" → |value| must be < DRAW_THRESHOLD
+        ("Start position",          chess.Board(),                                    None),
         ("White up queen",          chess.Board("4k3/8/8/8/8/8/8/Q3K3 w - - 0 1"),  1.0),
         ("Black up queen",          chess.Board("4K3/8/8/8/8/8/8/q3k3 w - - 0 1"), -1.0),
         ("KQ vs K, White to move",  chess.Board("8/8/8/8/4k3/8/8/3QK3 w - - 0 1"),  1.0),
         ("KQ vs K, Black to move",  chess.Board("8/8/8/8/4k3/8/8/3QK3 b - - 0 1"), -1.0),
+        # Equal endgame — tests whether draw dimension is open (dataset_feb_sf target)
+        ("KR vs KR (drawn)",        chess.Board("8/8/3k4/8/8/3K4/8/1R2r3 w - - 0 1"), "draw"),
     ]
 
     all_pass = True
@@ -553,13 +627,18 @@ def _sanity_check(model: PetraNet):
         if expected is None:
             ok = True
             mark = "~"
+            note = ""
+        elif expected == "draw":
+            ok = abs(val) < DRAW_THRESHOLD
+            mark = "✓" if ok else "✗"
+            note = f"  (expected |value| < {DRAW_THRESHOLD}, got {abs(val):.3f})"
         else:
             ok = (val * expected) > 0   # correct sign
             mark = "✓" if ok else "✗"
+            note = f"  (expected sign {'+'  if expected > 0 else '-'})"
         if not ok:
             all_pass = False
-        print(f"  {mark} {name:35s}  value={val:+.3f}"
-              + (f"  (expected sign {'+'  if expected > 0 else '-'})" if expected else ""))
+        print(f"  {mark} {name:35s}  value={val:+.3f}{note}")
 
     if all_pass:
         print("  All sign checks passed.")
