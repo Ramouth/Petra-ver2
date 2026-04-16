@@ -279,7 +279,7 @@ def check_known_positions(model: PetraNet, c_win: np.ndarray, c_loss: np.ndarray
         ("Starting position",           chess.Board()),
         ("KQ vs K — White to move",     chess.Board("4k3/8/8/8/8/8/8/4K2Q w - - 0 1")),
         ("KQ vs K — Black to move",     chess.Board("4k3/8/8/8/8/8/8/4K2Q b - - 0 1")),
-        ("Equal endgame (KR vs KR)",    chess.Board("8/8/3k4/8/8/3K4/8/1R2r3 w - - 0 1")),
+        ("Equal endgame (KR vs KR)",    chess.Board("8/3k4/8/r7/8/8/3K4/7R w - - 0 1")),
         ("White queen up",              chess.Board("4k3/8/8/8/8/8/8/Q3K3 w - - 0 1")),
         ("Black queen up",              chess.Board("4K3/8/8/8/8/8/8/q3k3 w - - 0 1")),
         ("Complex middlegame",          chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")),

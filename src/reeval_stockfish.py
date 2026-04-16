@@ -23,11 +23,40 @@ Why tanh(cp / 400)?
   +800cp position doesn't dominate the MSE loss over a +200cp position.
   AlphaZero uses a similar squashing convention.
 
-Usage
+Usage — single job (original behaviour)
 -----
     python3 src/reeval_stockfish.py --dataset dataset.pt --out dataset_sf.pt
     python3 src/reeval_stockfish.py --dataset dataset.pt --out dataset_sf.pt \\
         --depth 12 --n 200000 --stockfish /usr/games/stockfish --workers 32
+
+Usage — chunked reeval (split across multiple HPC jobs, each ≤ 24h wall)
+-----
+    # Job 0 of 3:
+    python3 src/reeval_stockfish.py --dataset dataset.pt \\
+        --n 400000 --seed 42 --depth 20 --workers 16 \\
+        --stockfish /path/to/stockfish \\
+        --chunk-idx 0 --n-chunks 3 --partial-out /scratch/part_0.pt
+
+    # Job 1 of 3  (same --n, --seed as above):
+    python3 src/reeval_stockfish.py --dataset dataset.pt \\
+        --n 400000 --seed 42 --depth 20 --workers 16 \\
+        --stockfish /path/to/stockfish \\
+        --chunk-idx 1 --n-chunks 3 --partial-out /scratch/part_1.pt
+
+    # Job 2 of 3:
+    python3 src/reeval_stockfish.py --dataset dataset.pt \\
+        --n 400000 --seed 42 --depth 20 --workers 16 \\
+        --stockfish /path/to/stockfish \\
+        --chunk-idx 2 --n-chunks 3 --partial-out /scratch/part_2.pt
+
+    # Merge (no SF/workers needed — just loads partials and applies filters):
+    python3 src/reeval_stockfish.py --dataset dataset.pt --out dataset_sf.pt \\
+        --merge /scratch/part_0.pt /scratch/part_1.pt /scratch/part_2.pt \\
+        --min-decisive 0.0 --max-pieces 32
+
+    --n, --seed must be identical across all chunk jobs and the merge call.
+    --chunk-idx and --n-chunks determine which slice of sampled positions each
+    job evaluates. All other args (depth, workers, stockfish) are per-chunk only.
 """
 
 import argparse
@@ -186,123 +215,170 @@ def _eval_one(args):
 
 
 # ---------------------------------------------------------------------------
-# Re-evaluation
+# Shared helpers for single-job and chunked modes
 # ---------------------------------------------------------------------------
 
-def reeval(dataset_path: str,
-           out_path: str,
-           stockfish_path: str = "/usr/games/stockfish",
-           depth: int = 10,
-           n: int = None,
-           seed: int = 42,
-           workers: int = 1,
-           min_decisive: float = 0.0,
-           max_pieces: int = 32):
+def _load_and_sample(dataset_path: str, n: int, seed: int):
     """
-    Load dataset, re-evaluate positions with Stockfish, save new dataset.
+    Load dataset, merge train+val, subsample n positions with fixed seed.
 
-    n:             if set, subsample this many positions from train+val combined.
-    workers:       number of parallel Stockfish processes.
-    min_decisive:  keep only positions where |tanh(eval)| >= this value.
-                   0.0 = keep all. 0.3 ≈ 130cp advantage.
-    max_pieces:    keep only positions with at most this many pieces on the board.
-                   32 = keep all. 16 = endgame-like. 24 = simplified middlegame.
-                   Filters out tactically complex positions a baby model can't learn from.
+    Returns a dict with everything downstream needs:
+      sampled_idxs  : list[int]       indices into the merged pool
+      all_fens      : list[str]
+      all_tensors   : Tensor (N, ...)
+      all_moves     : Tensor (N,)
+      all_visit_dists: Tensor or None
+      n_train_orig  : int             boundary for restoring train/val split
+      has_vd        : bool
     """
-    print(f"Loading {dataset_path} ...")
+    import random as _random
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
 
-    # Merge train + val for parallel evaluation, but track the boundary so
-    # the original split can be restored. This preserves game-level no-leakage:
-    # positions from the same game stay in the same split, so val loss is not
-    # optimistic due to positions from the same game appearing in both splits.
-    train_d = data["train"]
-    val_d   = data["val"]
+    train_d      = data["train"]
+    val_d        = data["val"]
     n_train_orig = len(train_d["tensors"])
 
-    all_tensors  = torch.cat([train_d["tensors"],  val_d["tensors"]],  dim=0)
-    all_fens     = train_d["fens"] + val_d["fens"]
-    all_moves    = torch.cat([train_d["move_idxs"], val_d["move_idxs"]], dim=0)
+    all_tensors = torch.cat([train_d["tensors"],  val_d["tensors"]],  dim=0)
+    all_fens    = train_d["fens"] + val_d["fens"]
+    all_moves   = torch.cat([train_d["move_idxs"], val_d["move_idxs"]], dim=0)
 
-    # Carry visit_dists through if present — these are the MCTS policy targets
-    # from self-play and must survive reeval so train.py uses the dense loss.
-    # Supervised datasets won't have them; that's fine (train.py handles both).
     has_vd = "visit_dists" in train_d
     if has_vd:
         all_visit_dists = torch.cat([train_d["visit_dists"], val_d["visit_dists"]], dim=0)
     else:
         all_visit_dists = None
 
-    # Free the full loaded dataset before starting the Stockfish loop.
     del data, train_d, val_d
     import gc; gc.collect()
 
     total = len(all_fens)
-    print(f"  Total positions: {total:,}")
-
-    # Subsample if requested — sample within each split to preserve boundaries.
     if n is not None and n < total:
-        import random
-        rng = random.Random(seed)
+        rng          = _random.Random(seed)
         sampled_idxs = sorted(rng.sample(range(total), n))
-        all_tensors = all_tensors[sampled_idxs]
-        all_fens    = [all_fens[i] for i in sampled_idxs]
-        all_moves   = all_moves[sampled_idxs]
+        all_tensors  = all_tensors[sampled_idxs]
+        all_fens     = [all_fens[i] for i in sampled_idxs]
+        all_moves    = all_moves[sampled_idxs]
         if all_visit_dists is not None:
             all_visit_dists = all_visit_dists[sampled_idxs]
-        print(f"  Subsampled to {n:,} positions")
     else:
         sampled_idxs = list(range(total))
-        n = total
 
-    print(f"\nStarting {workers} Stockfish worker(s) (depth={depth}) ...")
+    return {
+        "sampled_idxs":   sampled_idxs,
+        "all_fens":       all_fens,
+        "all_tensors":    all_tensors,
+        "all_moves":      all_moves,
+        "all_visit_dists": all_visit_dists,
+        "n_train_orig":   n_train_orig,
+        "has_vd":         has_vd,
+    }
 
-    new_values    = torch.zeros(n, dtype=torch.float32)
-    new_move_idxs = all_moves.clone()           # fallback: original human moves
-    all_packed_masks = torch.zeros(n, 512, dtype=torch.uint8)
-    valid_mask    = torch.zeros(n, dtype=torch.bool)
+
+def _run_sf_on_slice(fens_slice, stockfish_path, depth, workers):
+    """
+    Evaluate a list of FEN strings with Stockfish.
+
+    Returns (new_values, new_move_idxs, all_packed_masks, valid_mask) for the
+    slice only, each of length len(fens_slice).
+    """
+    n_slice = len(fens_slice)
+    new_values       = torch.zeros(n_slice, dtype=torch.float32)
+    new_move_idxs    = torch.full((n_slice,), -1, dtype=torch.long)
+    all_packed_masks = torch.zeros(n_slice, 512, dtype=torch.uint8)
+    valid_mask       = torch.zeros(n_slice, dtype=torch.bool)
+
+    errors = sf_move_hits = done = 0
     t0 = time.time()
-    errors = 0
-    sf_move_hits = 0
-    done = 0
 
     with multiprocessing.Pool(
         processes=workers,
         initializer=_init_worker,
         initargs=(stockfish_path, depth),
     ) as pool:
-        print(f"  Workers ready.")
-        for idx, val, sf_move_idx, packed_mask, err in pool.imap(
-                _eval_one, enumerate(all_fens), chunksize=64):
-            new_values[idx] = val
+        print(f"  Workers ready ({workers} processes, depth={depth}).")
+        for local_idx, val, sf_move_idx, packed_mask, err in pool.imap(
+                _eval_one, enumerate(fens_slice), chunksize=64):
+            new_values[local_idx] = val
             if not err:
                 if sf_move_idx >= 0:
-                    new_move_idxs[idx] = sf_move_idx
+                    new_move_idxs[local_idx] = sf_move_idx
                     sf_move_hits += 1
                 if packed_mask is not None:
-                    all_packed_masks[idx] = packed_mask
-                    valid_mask[idx] = True
+                    all_packed_masks[local_idx] = packed_mask
+                    valid_mask[local_idx] = True
             else:
                 errors += 1
             done += 1
             if done % 5000 == 0:
                 elapsed = time.time() - t0
                 rate    = done / elapsed
-                eta     = (n - done) / rate
-                print(f"  {done:>8,} / {n:,}  ({rate:.0f} pos/s)  ETA {eta/60:.0f} min")
+                eta     = (n_slice - done) / rate
+                print(f"  {done:>8,} / {n_slice:,}  "
+                      f"({rate:.0f} pos/s)  ETA {eta/60:.0f} min")
 
     elapsed = time.time() - t0
-    print(f"\nDone: {n:,} positions in {elapsed:.0f}s  ({n/elapsed:.0f} pos/s)")
+    print(f"\nDone: {n_slice:,} positions in {elapsed:.0f}s  ({n_slice/elapsed:.0f} pos/s)")
     if errors:
-        print(f"WARNING: {errors} evaluation errors (set to 0.0)")
-    print(f"SF best moves used: {sf_move_hits:,} / {n:,}  "
-          f"(fallback to human moves: {n - sf_move_hits:,})")
-    has_masks = valid_mask.all().item()
-    if not has_masks:
-        n_missing = int((~valid_mask).sum().item())
-        print(f"WARNING: {n_missing} positions missing legal masks — masks will not be stored")
+        print(f"WARNING: {errors} evaluation errors — these positions will be dropped at save time")
+    print(f"SF best moves used: {sf_move_hits:,} / {n_slice:,}  "
+          f"(fallback to human moves: {n_slice - sf_move_hits:,})")
 
-    # Report label distribution
+    return new_values, new_move_idxs, all_packed_masks, valid_mask
+
+
+def _apply_filter_and_save(
+        dataset_state: dict,
+        new_values: torch.Tensor,
+        new_move_idxs_sf: torch.Tensor,
+        all_packed_masks: torch.Tensor,
+        valid_mask: torch.Tensor,
+        out_path: str,
+        min_decisive: float,
+        max_pieces: int,
+        extra_meta: dict = None,
+):
+    """
+    Apply decisive/piece-count filter, restore train/val split, save dataset.
+    Shared between single-job reeval and merge.
+    """
+    all_fens        = dataset_state["all_fens"]
+    all_tensors     = dataset_state["all_tensors"]
+    all_moves_orig  = dataset_state["all_moves"]      # human-move fallback
+    all_visit_dists = dataset_state["all_visit_dists"]
+    sampled_idxs    = dataset_state["sampled_idxs"]
+    n_train_orig    = dataset_state["n_train_orig"]
+    has_vd          = dataset_state["has_vd"]
+
+    # Merge SF move where available, fall back to human move
+    final_move_idxs = all_moves_orig.clone()
+    sf_hit_mask = new_move_idxs_sf >= 0
+    final_move_idxs[sf_hit_mask] = new_move_idxs_sf[sf_hit_mask]
+
+    # Drop positions where SF evaluation failed.
+    # Failures are recorded as 0.0 in new_values, which would silently inject
+    # fake equal-position labels into the dataset — especially harmful when
+    # min_decisive=0.0 keeps all positions. Drop them unconditionally here
+    # before any further filtering.
+    n_bad = int((~valid_mask).sum().item())
+    if n_bad > 0:
+        print(f"\nDropping {n_bad} positions with evaluation errors "
+              f"(would otherwise inject 0.0 labels).")
+        keep_valid      = valid_mask.nonzero(as_tuple=True)[0]
+        new_values      = new_values[keep_valid]
+        all_tensors     = all_tensors[keep_valid]
+        final_move_idxs = final_move_idxs[keep_valid]
+        all_packed_masks= all_packed_masks[keep_valid]
+        all_fens        = [all_fens[i] for i in keep_valid.tolist()]
+        sampled_idxs    = [sampled_idxs[i] for i in keep_valid.tolist()]
+        if all_visit_dists is not None:
+            all_visit_dists = all_visit_dists[keep_valid]
+        valid_mask = valid_mask[keep_valid]   # now all True
+
+    # All remaining rows have valid evaluations and masks.
+    has_masks = valid_mask.all().item()
+    n = len(all_fens)
+
+    # Print label distribution
     vals = new_values.numpy()
     print(f"\nLabel statistics (SF evals, tanh-squashed):")
     print(f"  Mean:   {vals.mean():.4f}")
@@ -312,20 +388,8 @@ def reeval(dataset_path: str,
     print(f"  |v|>0.5 (decisive): {(np.abs(vals) > 0.5).mean()*100:.1f}%")
     print(f"  |v|<0.1 (equal):    {(np.abs(vals) < 0.1).mean()*100:.1f}%")
 
-    # ---------------------------------------------------------------------------
-    # Filter: decisive + structurally simple
-    #
-    # Two criteria (both must pass):
-    #   1. |eval| >= min_decisive  — the position is actually winning/losing
-    #   2. piece_count <= max_pieces — the advantage is visible on the board,
-    #      not hidden in deep tactics. Fewer pieces = endgame-like = learnable.
-    #
-    # A forced mate-in-15 through a tactical combination scores 1.0 but looks
-    # like a normal middlegame to a baby model — it's noise, not signal.
-    # A queen-up position with 8 pieces left is immediately learnable.
-    # ---------------------------------------------------------------------------
+    keep = list(range(n))
     if min_decisive > 0.0 or max_pieces < 32:
-        import chess
         keep = []
         skipped_eval = skipped_pieces = 0
         for i, fen in enumerate(all_fens):
@@ -342,9 +406,9 @@ def reeval(dataset_path: str,
 
         print(f"\nFilter applied:")
         print(f"  min_decisive={min_decisive}  max_pieces={max_pieces}")
-        print(f"  Kept:            {len(keep):,} / {n:,}")
-        print(f"  Dropped (eval):  {skipped_eval:,}")
-        print(f"  Dropped (pieces):{skipped_pieces:,}")
+        print(f"  Kept:             {len(keep):,} / {n:,}")
+        print(f"  Dropped (eval):   {skipped_eval:,}")
+        print(f"  Dropped (pieces): {skipped_pieces:,}")
 
         if len(keep) < 100:
             raise ValueError(
@@ -355,8 +419,7 @@ def reeval(dataset_path: str,
         keep_t           = torch.tensor(keep, dtype=torch.long)
         new_values       = new_values[keep_t]
         all_tensors      = all_tensors[keep_t]
-        all_moves        = all_moves[keep_t]
-        new_move_idxs    = new_move_idxs[keep_t]
+        final_move_idxs  = final_move_idxs[keep_t]
         all_packed_masks = all_packed_masks[keep_t]
         valid_mask       = valid_mask[keep_t]
         all_fens         = [all_fens[i] for i in keep]
@@ -369,13 +432,10 @@ def reeval(dataset_path: str,
         print(f"  Post-filter decisive rate: "
               f"{(np.abs(filtered_vals) > 0.5).mean()*100:.1f}%")
 
-    # Restore original train/val split by checking each position's source index.
-    # Positions with sampled_idxs[i] < n_train_orig came from the original train
-    # split; the rest came from val. This preserves game-level no-leakage.
+    # Restore train/val split
     train_idxs = [i for i, orig in enumerate(sampled_idxs) if orig < n_train_orig]
     val_idxs   = [i for i, orig in enumerate(sampled_idxs) if orig >= n_train_orig]
     if not val_idxs:
-        # Edge case: subsampling drew only train positions — take last 5% as val.
         n_val      = max(1, len(train_idxs) // 20)
         val_idxs   = train_idxs[-n_val:]
         train_idxs = train_idxs[:-n_val]
@@ -384,41 +444,258 @@ def reeval(dataset_path: str,
         d = {
             "tensors":   all_tensors[subset_idxs],
             "values":    new_values[subset_idxs],
-            "move_idxs": new_move_idxs[subset_idxs],   # SF best moves
+            "move_idxs": final_move_idxs[subset_idxs],
             "fens":      [all_fens[i] for i in subset_idxs],
         }
         if all_visit_dists is not None:
             d["visit_dists"] = all_visit_dists[subset_idxs]
         if has_masks:
-            d["legal_masks"] = all_packed_masks[subset_idxs]   # (N, 512) uint8, bit-packed
+            d["legal_masks"] = all_packed_masks[subset_idxs]
         return d
 
-    out = {
-        "train": pack(train_idxs),
-        "val":   pack(val_idxs),
-        "meta": {
-            "source":          dataset_path,
-            "stockfish_depth": depth,
-            "n_train":         len(train_idxs),
-            "n_val":           len(val_idxs),
-            "label_type":      "stockfish_tanh_cp400",
-            "has_visit_dists": has_vd,
-        },
+    meta = {
+        "n_train":         len(train_idxs),
+        "n_val":           len(val_idxs),
+        "label_type":      "stockfish_tanh_cp400",
+        "has_visit_dists": has_vd,
     }
+    if extra_meta:
+        meta.update(extra_meta)
 
+    out = {"train": pack(train_idxs), "val": pack(val_idxs), "meta": meta}
     torch.save(out, out_path)
     print(f"\nSaved → {out_path}")
     print(f"  train: {len(train_idxs):,}  val: {len(val_idxs):,}")
-    if has_vd:
-        print(f"  visit_dists: preserved (dense policy loss active in train.py)")
-    else:
-        print(f"  visit_dists: absent (supervised dataset — one-hot policy loss)")
-    print(f"  move_idxs:   SF best moves  (human-move fallback where SF unavailable)")
-    if has_masks:
-        print(f"  legal_masks: stored ({512} bytes/position bit-packed, "
-              f"train.py will mask policy logits)")
-    else:
-        print(f"  legal_masks: NOT stored (some positions had errors)")
+    if not has_masks:
+        print(f"  legal_masks: NOT stored (some positions had evaluation errors)")
+
+
+# ---------------------------------------------------------------------------
+# Chunked reeval — evaluate one slice, save partial result
+# ---------------------------------------------------------------------------
+
+def reeval_chunk(dataset_path: str,
+                 partial_out: str,
+                 chunk_idx: int,
+                 n_chunks: int,
+                 stockfish_path: str,
+                 depth: int,
+                 n: int,
+                 seed: int,
+                 workers: int):
+    """
+    Evaluate one chunk of positions and save a partial result file.
+
+    All chunk jobs for the same dataset must use identical --n and --seed so
+    that _load_and_sample produces the same sampled_idxs, making slices
+    non-overlapping and covering the full set exactly.
+    """
+    print(f"=== Chunk {chunk_idx} / {n_chunks}  dataset={dataset_path} ===")
+    state    = _load_and_sample(dataset_path, n, seed)
+    n_total  = len(state["all_fens"])
+    chunk_sz = (n_total + n_chunks - 1) // n_chunks   # ceiling division
+    start    = chunk_idx * chunk_sz
+    end      = min(start + chunk_sz, n_total)
+
+    print(f"  Total positions: {n_total:,}  chunk size: {chunk_sz:,}")
+    print(f"  This chunk: [{start:,}, {end:,})  ({end-start:,} positions)")
+
+    fens_slice = state["all_fens"][start:end]
+    new_values, new_move_idxs, all_packed_masks, valid_mask = \
+        _run_sf_on_slice(fens_slice, stockfish_path, depth, workers)
+
+    partial = {
+        "chunk_idx":   chunk_idx,
+        "n_chunks":    n_chunks,
+        "n_total":     n_total,
+        "n":           n,
+        "seed":        seed,
+        "depth":       depth,
+        "start":       start,
+        "end":         end,
+        "new_values":       new_values,
+        "new_move_idxs":    new_move_idxs,
+        "all_packed_masks": all_packed_masks,
+        "valid_mask":       valid_mask,
+    }
+    torch.save(partial, partial_out)
+    print(f"\nPartial saved → {partial_out}")
+    print(f"  chunk {chunk_idx}/{n_chunks}: positions [{start:,}, {end:,})")
+
+
+# ---------------------------------------------------------------------------
+# Merge — combine partials into a final filtered dataset
+# ---------------------------------------------------------------------------
+
+def merge_partials(dataset_path: str,
+                   partial_paths: list,
+                   out_path: str,
+                   min_decisive: float = 0.0,
+                   max_pieces: int = 32,
+                   n: int = 200_000,
+                   seed: int = 42):
+    """
+    Merge chunk partial files into a final dataset.
+
+    n and seed must exactly match the values used when running chunk jobs.
+    They are validated against the values recorded inside the partial files.
+    """
+    print(f"=== Merging {len(partial_paths)} partial files ===")
+
+    # Load all partials and validate consistency
+    partials = []
+    seen_chunk_idxs = set()
+    ref_n = ref_seed = ref_n_chunks = ref_n_total = ref_depth = None
+
+    for path in sorted(partial_paths):
+        p = torch.load(path, map_location="cpu", weights_only=False)
+
+        if ref_n is None:
+            ref_n        = p["n"]
+            ref_seed     = p["seed"]
+            ref_n_chunks = p["n_chunks"]
+            ref_n_total  = p["n_total"]
+            ref_depth    = p["depth"]
+        else:
+            errors = []
+            if p["n"]        != ref_n:        errors.append(f"n={p['n']} (expected {ref_n})")
+            if p["seed"]     != ref_seed:     errors.append(f"seed={p['seed']} (expected {ref_seed})")
+            if p["n_chunks"] != ref_n_chunks: errors.append(f"n_chunks={p['n_chunks']} (expected {ref_n_chunks})")
+            if p["n_total"]  != ref_n_total:  errors.append(f"n_total={p['n_total']} (expected {ref_n_total})")
+            if p["depth"]    != ref_depth:    errors.append(f"depth={p['depth']} (expected {ref_depth})")
+            if errors:
+                raise ValueError(f"Partial {path} is inconsistent: {', '.join(errors)}")
+
+        if p["chunk_idx"] in seen_chunk_idxs:
+            raise ValueError(
+                f"Duplicate chunk_idx={p['chunk_idx']} — "
+                f"{path} covers the same chunk as a previously loaded partial."
+            )
+        seen_chunk_idxs.add(p["chunk_idx"])
+
+        partials.append(p)
+        print(f"  Loaded {path}  "
+              f"chunk {p['chunk_idx']}/{p['n_chunks']}  "
+              f"positions [{p['start']:,}, {p['end']:,})  depth={p['depth']}")
+
+    # Validate caller's --n / --seed against what the chunks used.
+    # argparse always supplies defaults so these are never None — validate
+    # explicitly rather than silently overriding with partial values.
+    if n != ref_n:
+        raise ValueError(
+            f"--n {n} does not match the value recorded in partials ({ref_n}). "
+            f"Use --n {ref_n} to match the chunk jobs."
+        )
+    if seed != ref_seed:
+        raise ValueError(
+            f"--seed {seed} does not match the value recorded in partials ({ref_seed}). "
+            f"Use --seed {ref_seed} to match the chunk jobs."
+        )
+
+    # Re-derive the exact same sampling as the chunk jobs used
+    state   = _load_and_sample(dataset_path, n, seed)
+    n_total = len(state["all_fens"])
+    if n_total != ref_n_total:
+        raise ValueError(
+            f"Dataset produced {n_total} positions but partials expected {ref_n_total}. "
+            f"Ensure --n and --seed match the chunk jobs."
+        )
+
+    # Assemble full evaluation arrays.
+    # Use a boolean coverage array to detect both missing and overlapping ranges.
+    new_values       = torch.zeros(n_total, dtype=torch.float32)
+    new_move_idxs    = torch.full((n_total,), -1, dtype=torch.long)
+    all_packed_masks = torch.zeros(n_total, 512, dtype=torch.uint8)
+    valid_mask       = torch.zeros(n_total, dtype=torch.bool)
+    covered          = np.zeros(n_total, dtype=bool)
+
+    for p in partials:
+        s, e = p["start"], p["end"]
+        overlap = covered[s:e].any()
+        if overlap:
+            n_overlap = int(covered[s:e].sum())
+            raise ValueError(
+                f"Partial chunk {p['chunk_idx']} (positions [{s}, {e})) overlaps "
+                f"{n_overlap} positions already covered by an earlier partial. "
+                f"Possible duplicate or mismatched --n-chunks."
+            )
+        covered[s:e] = True
+        new_values[s:e]       = p["new_values"]
+        new_move_idxs[s:e]    = p["new_move_idxs"]
+        all_packed_masks[s:e] = p["all_packed_masks"]
+        valid_mask[s:e]       = p["valid_mask"]
+
+    missing_positions = np.where(~covered)[0]
+    if len(missing_positions) > 0:
+        lo, hi = int(missing_positions[0]), int(missing_positions[-1])
+        raise ValueError(
+            f"{len(missing_positions)} positions not covered by any partial "
+            f"(range [{lo}, {hi}]). Submit missing chunk jobs before merging."
+        )
+
+    print(f"\nAll {n_total:,} positions assembled from {len(partials)} partials "
+          f"(depth={ref_depth}, n_chunks={ref_n_chunks}).")
+
+    _apply_filter_and_save(
+        dataset_state=state,
+        new_values=new_values,
+        new_move_idxs_sf=new_move_idxs,
+        all_packed_masks=all_packed_masks,
+        valid_mask=valid_mask,
+        out_path=out_path,
+        min_decisive=min_decisive,
+        max_pieces=max_pieces,
+        extra_meta={"source": dataset_path, "stockfish_depth": partials[0]["depth"]},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Re-evaluation (single job — original behaviour, preserved for compatibility)
+# ---------------------------------------------------------------------------
+
+def reeval(dataset_path: str,
+           out_path: str,
+           stockfish_path: str = "/usr/games/stockfish",
+           depth: int = 10,
+           n: int = None,
+           seed: int = 42,
+           workers: int = 1,
+           min_decisive: float = 0.0,
+           max_pieces: int = 32):
+    """
+    Load dataset, re-evaluate all positions in one job, save new dataset.
+
+    For long runtimes that may exceed the HPC wall time, use the chunked
+    workflow instead: --chunk-idx / --n-chunks to evaluate slices, then
+    --merge to combine the partial files into the final dataset.
+
+    n:             if set, subsample this many positions from train+val combined.
+    workers:       number of parallel Stockfish processes.
+    min_decisive:  keep only positions where |tanh(eval)| >= this value.
+                   0.0 = keep all. 0.3 ≈ 130cp advantage.
+    max_pieces:    keep only positions with at most this many pieces on the board.
+                   32 = keep all. 16 = endgame-like. 24 = simplified middlegame.
+    """
+    print(f"Loading {dataset_path} ...")
+    state   = _load_and_sample(dataset_path, n, seed)
+    n_total = len(state["all_fens"])
+    print(f"  Total positions to evaluate: {n_total:,}")
+    print(f"\nStarting {workers} Stockfish worker(s) (depth={depth}) ...")
+
+    new_values, new_move_idxs, all_packed_masks, valid_mask = \
+        _run_sf_on_slice(state["all_fens"], stockfish_path, depth, workers)
+
+    _apply_filter_and_save(
+        dataset_state=state,
+        new_values=new_values,
+        new_move_idxs_sf=new_move_idxs,
+        all_packed_masks=all_packed_masks,
+        valid_mask=valid_mask,
+        out_path=out_path,
+        min_decisive=min_decisive,
+        max_pieces=max_pieces,
+        extra_meta={"source": dataset_path, "stockfish_depth": depth},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -426,35 +703,107 @@ def reeval(dataset_path: str,
 # ---------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset",    required=True,                   help="Input dataset.pt")
-    ap.add_argument("--out",        default="dataset_sf.pt",         help="Output path")
-    ap.add_argument("--stockfish",  default="/usr/games/stockfish",  help="Stockfish binary")
-    ap.add_argument("--depth",      type=int, default=10,            help="Search depth")
+    ap = argparse.ArgumentParser(
+        description="Re-evaluate dataset positions with Stockfish.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modes
+-----
+  Single job (default):
+    python3 reeval_stockfish.py --dataset X --out Y [--depth D --workers W ...]
+
+  Chunked (split across multiple HPC jobs, each fits within 24h wall):
+    # Run one job per chunk — all must share --n and --seed:
+    python3 reeval_stockfish.py --dataset X --n 400000 --seed 42 \\
+        --depth 20 --workers 16 --stockfish /path/sf \\
+        --chunk-idx 0 --n-chunks 3 --partial-out /scratch/part_0.pt
+    # ... repeat for chunk-idx 1, 2
+
+    # Merge when all chunks are done:
+    python3 reeval_stockfish.py --dataset X --out Y \\
+        --merge /scratch/part_0.pt /scratch/part_1.pt /scratch/part_2.pt \\
+        --n 400000 --seed 42 --min-decisive 0.0 --max-pieces 32
+"""
+    )
+    ap.add_argument("--dataset",    required=True,
+                    help="Input dataset.pt (required for all modes)")
+    ap.add_argument("--out",        default="dataset_sf.pt",
+                    help="Output path for final dataset (single-job and merge modes)")
+    ap.add_argument("--stockfish",  default="/usr/games/stockfish",
+                    help="Stockfish binary path")
+    ap.add_argument("--depth",      type=int, default=10,
+                    help="Search depth (single-job and chunk modes)")
     ap.add_argument("--n",          type=int, default=200_000,
-                    help="Number of positions to evaluate (default 200k)")
-    ap.add_argument("--seed",          type=int,   default=42)
-    ap.add_argument("--workers",       type=int,   default=1,
-                    help="Number of parallel Stockfish processes (default 1)")
-    ap.add_argument("--min-decisive",  type=float, default=0.0,
-                    help="Keep only positions with |tanh(eval)| >= this. "
-                         "0.3 ≈ 130cp. 0.0 = keep all (default).")
-    ap.add_argument("--max-pieces",    type=int,   default=32,
-                    help="Keep only positions with <= this many pieces. "
-                         "32 = all, 24 = simplified middlegame, 16 = endgame (default: 32).")
+                    help="Positions to evaluate total (must match across all chunks)")
+    ap.add_argument("--seed",       type=int, default=42,
+                    help="Random seed for subsampling (must match across all chunks)")
+    ap.add_argument("--workers",    type=int, default=1,
+                    help="Parallel Stockfish processes (single-job and chunk modes)")
+    ap.add_argument("--min-decisive", type=float, default=0.0,
+                    help="Keep only |tanh(eval)| >= this. 0.0 = keep all (default).")
+    ap.add_argument("--max-pieces",   type=int,   default=32,
+                    help="Keep only positions with <= this many pieces (default: 32).")
+
+    # Chunked mode
+    ap.add_argument("--chunk-idx",   type=int, default=None,
+                    help="Index of this chunk (0-based). Enables chunk mode.")
+    ap.add_argument("--n-chunks",    type=int, default=None,
+                    help="Total number of chunks. Required with --chunk-idx.")
+    ap.add_argument("--partial-out", default=None,
+                    help="Output path for this chunk's partial result. "
+                         "Required with --chunk-idx.")
+
+    # Merge mode
+    ap.add_argument("--merge", nargs="+", default=None, metavar="PARTIAL",
+                    help="Merge mode: list of partial .pt files to combine into --out.")
+
     args = ap.parse_args()
 
-    reeval(
-        dataset_path=args.dataset,
-        out_path=args.out,
-        stockfish_path=args.stockfish,
-        depth=args.depth,
-        n=args.n,
-        seed=args.seed,
-        workers=args.workers,
-        min_decisive=args.min_decisive,
-        max_pieces=args.max_pieces,
-    )
+    if args.merge is not None:
+        # Merge mode — no SF evaluation, just assemble partials and filter
+        if args.out == "dataset_sf.pt" and args.out not in args.merge:
+            pass  # user didn't set --out explicitly; warn but proceed
+        merge_partials(
+            dataset_path=args.dataset,
+            partial_paths=args.merge,
+            out_path=args.out,
+            min_decisive=args.min_decisive,
+            max_pieces=args.max_pieces,
+            n=args.n,
+            seed=args.seed,
+        )
+
+    elif args.chunk_idx is not None:
+        # Chunk mode — evaluate a slice, save partial
+        if args.n_chunks is None:
+            ap.error("--n-chunks is required with --chunk-idx")
+        if args.partial_out is None:
+            ap.error("--partial-out is required with --chunk-idx")
+        reeval_chunk(
+            dataset_path=args.dataset,
+            partial_out=args.partial_out,
+            chunk_idx=args.chunk_idx,
+            n_chunks=args.n_chunks,
+            stockfish_path=args.stockfish,
+            depth=args.depth,
+            n=args.n,
+            seed=args.seed,
+            workers=args.workers,
+        )
+
+    else:
+        # Single-job mode — original behaviour
+        reeval(
+            dataset_path=args.dataset,
+            out_path=args.out,
+            stockfish_path=args.stockfish,
+            depth=args.depth,
+            n=args.n,
+            seed=args.seed,
+            workers=args.workers,
+            min_decisive=args.min_decisive,
+            max_pieces=args.max_pieces,
+        )
 
 
 if __name__ == "__main__":

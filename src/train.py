@@ -620,7 +620,8 @@ def _sanity_check(model: PetraNet):
         ("KQ vs K, White to move",  chess.Board("8/8/8/8/4k3/8/8/3QK3 w - - 0 1"),  1.0),
         ("KQ vs K, Black to move",  chess.Board("8/8/8/8/4k3/8/8/3QK3 b - - 0 1"), -1.0),
         # Equal endgame — tests whether draw dimension is open (dataset_feb_sf target)
-        ("KR vs KR (drawn)",        chess.Board("8/8/3k4/8/8/3K4/8/1R2r3 w - - 0 1"), "draw"),
+        # Rooks on different ranks AND files so no immediate capture is possible.
+        ("KR vs KR (drawn)",        chess.Board("8/3k4/8/r7/8/8/3K4/7R w - - 0 1"), "draw"),
     ]
 
     all_pass = True
