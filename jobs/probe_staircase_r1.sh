@@ -24,5 +24,4 @@ module load gcc/13.4.0-binutils-2.44
 python3 -u /zhome/81/b/206091/Petra-ver2/src/probe_geometry.py \
     --model   /zhome/81/b/206091/Petra-ver2/models/staircase_r1/best.pt \
     --dataset /zhome/81/b/206091/Petra-ver2/data/dataset_feb_sf.pt \
-    --n 5000 \
-    --strict
+    --n 5000
