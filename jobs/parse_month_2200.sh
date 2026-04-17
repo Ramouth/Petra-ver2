@@ -3,7 +3,7 @@
 #BSUB -q hpc
 #BSUB -n 4
 #BSUB -R "rusage[mem=16GB]"
-#BSUB -W 16:00
+#BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/parse_month_%J.out
 #BSUB -e /zhome/81/b/206091/logs/parse_month_%J.err
 
@@ -19,7 +19,7 @@ MIN_ELO="${MIN_ELO:-2500}"
 # How many qualifying games to keep.
 # With 108M games and min_elo=2500, stopping at 300k games is a small fraction
 # of what's available — no need to scan the whole file.
-MAX_GAMES="${MAX_GAMES:-300000}"
+MAX_GAMES="${MAX_GAMES:-120000}"
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"

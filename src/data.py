@@ -35,6 +35,7 @@ import io
 import json
 import os
 import random
+import signal
 import sys
 import time
 from dataclasses import dataclass
@@ -208,11 +209,16 @@ def parse_pgn(pgn_path: str,
 
     count = 0
     t0 = time.time()
+    last_game_id = -1
 
     for game_id, result, sampled_pairs in _iter_games(
             pgn_path, max_games, min_elo, require_normal_termination, rng,
             skip_opening=skip_opening, positions_per_game=positions_per_game,
             sampling=sampling):
+
+        if _stop_early:
+            print(f"\n  SIGTERM received — stopping after {game_id:,} games.", flush=True)
+            break
 
         for ply, b, move in sampled_pairs:
             tensor_buf[count]   = board_to_tensor(b).numpy().astype(np.uint8)
@@ -223,12 +229,13 @@ def parse_pgn(pgn_path: str,
             plys.append(ply)
             count += 1
 
+        last_game_id = game_id
         if (game_id + 1) % 10_000 == 0:
             elapsed = time.time() - t0
             print(f"  {game_id+1:,} games, {count:,} positions, {elapsed:.0f}s")
 
     elapsed = time.time() - t0
-    print(f"Done: {game_id+1:,} games, {count:,} positions in {elapsed:.1f}s")
+    print(f"Done: {last_game_id+1:,} games, {count:,} positions in {elapsed:.1f}s")
 
     # Convert to Position list (views into pre-allocated arrays — no copy)
     positions = [
@@ -512,7 +519,22 @@ def split_and_save(positions: List[Position],
 # CLI
 # ---------------------------------------------------------------------------
 
+# Global flag set by SIGTERM handler — checked in the parse loop so the job
+# exits cleanly and saves whatever it has collected, rather than being killed
+# mid-run with no output (the LSF wall-time kill scenario).
+_stop_early = False
+
+def _handle_sigterm(signum, frame):
+    global _stop_early
+    print(f"\nSignal {signum} received — will save partial results after current game.",
+          flush=True)
+    _stop_early = True
+
+
 def main():
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT,  _handle_sigterm)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--pgn",           required=True,        help="Path to PGN file")
     ap.add_argument("--out",           default="dataset.pt", help="Output .pt path")
