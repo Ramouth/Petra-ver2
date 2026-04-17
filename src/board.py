@@ -113,9 +113,9 @@ def outcome_to_value(result: str, turn: chess.Color) -> float:
     Convert a PGN result string to a value from the perspective of `turn`.
 
     result: "1-0", "0-1", "1/2-1/2"
-    Returns +1 (current side wins), -1 (loses), or DRAW_VALUE (draw).
+    Returns +1 (current side wins), -1 (loses), or 0.0 (draw).
     """
-    DRAW_VALUE = -0.1   # draw contempt: draws are slightly negative
+    DRAW_VALUE = 0.0
 
     if result == "1-0":
         return 1.0 if turn == chess.WHITE else -1.0

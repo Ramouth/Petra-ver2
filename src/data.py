@@ -9,7 +9,7 @@ Label convention
 Values are from the perspective of the side to move:
   win  = +1.0   (side to move wins the game)
   loss = -1.0   (side to move loses)
-  draw = -0.1   (draw contempt — matches MCTS terminal scoring)
+  draw =  0.0   (neutral — draw contempt belongs in RL, not supervised pretraining)
 
 This is verified by the validation suite before any dataset is saved.
 
@@ -60,16 +60,15 @@ MAX_GAME_MOVES = 200
 # Validation fraction held out at game level
 VAL_FRACTION = 0.05
 
-VALID_LABEL_VALUES = {1.0, -0.1, -1.0}
+VALID_LABEL_VALUES = {1.0, 0.0, -1.0}
 
-# float32 can't represent -0.1 exactly; use tolerance for all label checks
 _LABEL_TOL = 1e-4
 
 def _label_class(v: float) -> str:
     """Classify a label value tolerantly. Returns 'win', 'draw', 'loss', or 'invalid'."""
     if abs(v - 1.0) < _LABEL_TOL:  return "win"
     if abs(v + 1.0) < _LABEL_TOL:  return "loss"
-    if abs(v + 0.1) < _LABEL_TOL:  return "draw"
+    if abs(v)       < _LABEL_TOL:  return "draw"
     return "invalid"
 
 
@@ -293,7 +292,7 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
         errors.append(f"CHECK 1 FAIL — {len(bad_labels)} invalid label values "
                       f"(first 5: {[v for _, v in bad_labels[:5]]})")
     else:
-        print("CHECK 1 PASS — all labels in {+1.0, -0.1, -1.0}")
+        print("CHECK 1 PASS — all labels in {+1.0, 0.0, -1.0}")
 
     # ------------------------------------------------------------------
     # Check 2: sign correctness on known positions
@@ -329,7 +328,7 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
 
     print(f"CHECK 3 — label distribution:")
     print(f"  win (+1.0)  : {n_win:>8,}  ({pct_win:5.1f}%)")
-    print(f"  draw (-0.1) : {n_draw:>8,}  ({pct_draw:5.1f}%)")
+    print(f"  draw ( 0.0) : {n_draw:>8,}  ({pct_draw:5.1f}%)")
     print(f"  loss (-1.0) : {n_loss:>8,}  ({pct_loss:5.1f}%)")
 
     # Win and loss should be approximately equal (since every win for one
@@ -496,7 +495,7 @@ def split_and_save(positions: List[Position],
             "n_val":           len(val),
             "val_fraction":    val_fraction,
             "label_values":    list(VALID_LABEL_VALUES),
-            "draw_value":      -0.1,
+            "draw_value":      0.0,
             "skip_opening":    skip_opening,
             "max_per_game":    positions_per_game,
             "sampling":        sampling,
