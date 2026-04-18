@@ -177,7 +177,9 @@ def parse_pgn(pgn_path: str,
               seed: int = 42,
               skip_opening: int = SKIP_OPENING_MOVES,
               positions_per_game: int = MAX_POSITIONS_PER_GAME,
-              sampling: str = "random") -> List[Position]:
+              sampling: str = "random",
+              checkpoint_path: str = "",
+              checkpoint_every: int = 0) -> List[Position]:
     """
     Stream a PGN file and return a list of Position objects.
 
@@ -216,7 +218,11 @@ def parse_pgn(pgn_path: str,
             sampling=sampling):
 
         if _stop_early:
-            print(f"\n  SIGTERM received — stopping after {game_id:,} games.", flush=True)
+            print(f"\n  Signal received — stopping after {game_id:,} games.", flush=True)
+            if checkpoint_path:
+                _save_raw_checkpoint(tensor_buf, value_buf, move_idx_buf,
+                                     fens, game_ids, plys, count, game_id + 1,
+                                     checkpoint_path)
             break
 
         for ply, b, move in sampled_pairs:
@@ -232,6 +238,11 @@ def parse_pgn(pgn_path: str,
         if (game_id + 1) % 10_000 == 0:
             elapsed = time.time() - t0
             print(f"  {game_id+1:,} games, {count:,} positions, {elapsed:.0f}s")
+
+        if checkpoint_path and checkpoint_every > 0 and (game_id + 1) % checkpoint_every == 0:
+            _save_raw_checkpoint(tensor_buf, value_buf, move_idx_buf,
+                                 fens, game_ids, plys, count, game_id + 1,
+                                 checkpoint_path)
 
     elapsed = time.time() - t0
     print(f"Done: {last_game_id+1:,} games, {count:,} positions in {elapsed:.1f}s")
@@ -530,6 +541,49 @@ def _handle_sigterm(signum, frame):
     _stop_early = True
 
 
+def _save_raw_checkpoint(tensor_buf, value_buf, move_idx_buf, fens,
+                         game_ids, plys, count, n_games, path):
+    """
+    Fast checkpoint from live numpy buffers — no Position objects, no validation.
+    Written every N games and on SIGINT so progress survives SIGKILL.
+    Load with torch.load and convert via _checkpoint_to_positions().
+    """
+    tmp = path + ".tmp"
+    torch.save({
+        "tensor_buf":   tensor_buf[:count].copy(),
+        "value_buf":    value_buf[:count].copy(),
+        "move_idx_buf": move_idx_buf[:count].copy(),
+        "fens":         list(fens),
+        "game_ids":     list(game_ids),
+        "plys":         list(plys),
+        "n_positions":  count,
+        "n_games":      n_games,
+    }, tmp)
+    os.replace(tmp, path)   # atomic on POSIX
+    print(f"  [ckpt] {n_games:,} games / {count:,} positions → {path}", flush=True)
+
+
+def _checkpoint_to_positions(ckpt: dict) -> "List[Position]":
+    tb  = ckpt["tensor_buf"]
+    vb  = ckpt["value_buf"]
+    mb  = ckpt["move_idx_buf"]
+    fns = ckpt["fens"]
+    gids = ckpt["game_ids"]
+    plss = ckpt["plys"]
+    n   = ckpt["n_positions"]
+    return [
+        Position(
+            tensor   = torch.from_numpy(tb[i]),
+            value    = float(vb[i]),
+            move_idx = int(mb[i]),
+            fen      = fns[i],
+            game_id  = gids[i],
+            ply      = plss[i],
+        )
+        for i in range(n)
+    ]
+
+
 def main():
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT,  _handle_sigterm)
@@ -557,18 +611,34 @@ def main():
                     help="'random': sample uniformly at random (default). "
                          "'even': evenly spaced across game arc — guarantees "
                          "positions from opening, middlegame, and endgame.")
+    ap.add_argument("--checkpoint-every", type=int, default=10_000,
+                    help="Save a raw checkpoint every N games (default 10000). "
+                         "Survives SIGKILL at wall-time. Set 0 to disable.")
+    ap.add_argument("--from-checkpoint", default="",
+                    help="Skip parsing; load this raw checkpoint .pt and convert "
+                         "it directly to the final dataset.")
     args = ap.parse_args()
 
-    positions = parse_pgn(
-        pgn_path=args.pgn,
-        max_games=args.max_games,
-        min_elo=args.min_elo,
-        require_normal_termination=not args.no_termination_filter,
-        seed=args.seed,
-        skip_opening=args.skip_opening,
-        positions_per_game=args.positions_per_game,
-        sampling=args.sampling,
-    )
+    ckpt_path = args.out.replace(".pt", ".ckpt.pt") if args.checkpoint_every > 0 else ""
+
+    if args.from_checkpoint:
+        print(f"Loading checkpoint: {args.from_checkpoint}")
+        ckpt = torch.load(args.from_checkpoint, weights_only=False)
+        print(f"  {ckpt['n_games']:,} games / {ckpt['n_positions']:,} positions")
+        positions = _checkpoint_to_positions(ckpt)
+    else:
+        positions = parse_pgn(
+            pgn_path=args.pgn,
+            max_games=args.max_games,
+            min_elo=args.min_elo,
+            require_normal_termination=not args.no_termination_filter,
+            seed=args.seed,
+            skip_opening=args.skip_opening,
+            positions_per_game=args.positions_per_game,
+            sampling=args.sampling,
+            checkpoint_path=ckpt_path,
+            checkpoint_every=args.checkpoint_every,
+        )
 
     if not positions:
         print("No positions extracted. Check PGN path and filters.")

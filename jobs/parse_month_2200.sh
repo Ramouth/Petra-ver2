@@ -19,7 +19,7 @@ MIN_ELO="${MIN_ELO:-2500}"
 # How many qualifying games to keep.
 # With 108M games and min_elo=2500, stopping at 300k games is a small fraction
 # of what's available — no need to scan the whole file.
-MAX_GAMES="${MAX_GAMES:-120000}"
+MAX_GAMES="${MAX_GAMES:-100000}"
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"
@@ -57,7 +57,8 @@ python3 -u "${SRC}/data.py" \
     --positions-per-game 20 \
     --skip-opening       5 \
     --sampling           even \
-    --no-strict
+    --no-strict          \
+    --checkpoint-every   10000
 
 echo
 echo "Done. Output: ${OUT_FILE}"
