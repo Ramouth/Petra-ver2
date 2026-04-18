@@ -1,8 +1,8 @@
 #!/bin/bash
 #BSUB -J parse_month
 #BSUB -q hpc
-#BSUB -n 4
-#BSUB -R "rusage[mem=16GB]"
+#BSUB -n 1
+#BSUB -R "rusage[mem=2GB]"
 #BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/parse_month_%J.out
 #BSUB -e /zhome/81/b/206091/logs/parse_month_%J.err

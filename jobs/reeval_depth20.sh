@@ -3,7 +3,7 @@
 #BSUB -q hpc
 #BSUB -n 16
 #BSUB -R "rusage[mem=4GB]"
-#BSUB -W 20:00
+#BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/reeval_depth20_%J.out
 #BSUB -e /zhome/81/b/206091/logs/reeval_depth20_%J.err
 
@@ -11,18 +11,24 @@
 # Set MONTH, YEAR, and CHUNK_IDX before submitting.
 # Submit one job per chunk (0, 1, 2), all with same MONTH/YEAR:
 #
-#   MONTH=03 YEAR=2020 CHUNK_IDX=0 bsub < jobs/reeval_depth20.sh
-#   MONTH=03 YEAR=2020 CHUNK_IDX=1 bsub < jobs/reeval_depth20.sh
-#   MONTH=03 YEAR=2020 CHUNK_IDX=2 bsub < jobs/reeval_depth20.sh
+#   MONTH=03 YEAR=2023 CHUNK_IDX=0 bsub < jobs/reeval_depth20.sh
+#   MONTH=03 YEAR=2023 CHUNK_IDX=1 bsub < jobs/reeval_depth20.sh
+#   MONTH=03 YEAR=2023 CHUNK_IDX=2 bsub < jobs/reeval_depth20.sh
+#   MONTH=03 YEAR=2023 CHUNK_IDX=3 bsub < jobs/reeval_depth20.sh
+#   MONTH=03 YEAR=2023 CHUNK_IDX=4 bsub < jobs/reeval_depth20.sh
+#   MONTH=03 YEAR=2023 CHUNK_IDX=5 bsub < jobs/reeval_depth20.sh
 #
-# After all 3 finish, run the merge job:
-#   MONTH=03 YEAR=2020 bsub < jobs/reeval_merge.sh
+# After all 6 finish, run the merge job:
+#   MONTH=03 YEAR=2023 bsub < jobs/reeval_merge.sh
+#
+# If a chunk hits the wall, it saves a checkpoint with however far it got.
+# The merge will report which positions are missing — resubmit that CHUNK_IDX.
 
 MONTH="${MONTH:-03}"
-YEAR="${YEAR:-2020}"
+YEAR="${YEAR:-2023}"
 CHUNK_IDX="${CHUNK_IDX:-0}"
-N_CHUNKS=3          # 400k positions / 3 ≈ 133k per chunk → ~8-10h at depth 20
-N=400000
+N_CHUNKS=6          # 800k positions / 6 ≈ 133k per chunk → ~8-10h at depth 20
+N=800000
 SEED=42
 
 BLACKHOLE="/dtu/blackhole/0b/206091"

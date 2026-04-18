@@ -63,6 +63,7 @@ import argparse
 import math
 import multiprocessing
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -165,6 +166,20 @@ class Stockfish:
     def close(self):
         self._send("quit")
         self._proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# Early-stop flag — set by SIGTERM/SIGINT handler so the eval loop can save
+# a checkpoint before the OS sends SIGKILL.
+# ---------------------------------------------------------------------------
+
+_stop_early = False
+
+def _handle_sigterm(signum, frame):
+    global _stop_early
+    print(f"\nSignal {signum} received — will checkpoint after current batch.",
+          flush=True)
+    _stop_early = True
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +289,17 @@ def _load_and_sample(dataset_path: str, n: int, seed: int):
     }
 
 
-def _run_sf_on_slice(fens_slice, stockfish_path, depth, workers):
+def _run_sf_on_slice(fens_slice, stockfish_path, depth, workers,
+                     on_checkpoint=None, checkpoint_interval=10_000):
     """
     Evaluate a list of FEN strings with Stockfish.
 
-    Returns (new_values, new_move_idxs, all_packed_masks, valid_mask) for the
-    slice only, each of length len(fens_slice).
+    Returns (new_values, new_move_idxs, all_packed_masks, valid_mask, done)
+    where done <= len(fens_slice) — may be less if stopped early by SIGTERM.
+
+    on_checkpoint(done, values, move_idxs, masks, valid): called every
+    checkpoint_interval positions and on early stop. Use this to flush a
+    partial save so wall-time kills don't lose all progress.
     """
     n_slice = len(fens_slice)
     new_values       = torch.zeros(n_slice, dtype=torch.float32)
@@ -314,16 +334,24 @@ def _run_sf_on_slice(fens_slice, stockfish_path, depth, workers):
                 rate    = done / elapsed
                 eta     = (n_slice - done) / rate
                 print(f"  {done:>8,} / {n_slice:,}  "
-                      f"({rate:.0f} pos/s)  ETA {eta/60:.0f} min")
+                      f"({rate:.0f} pos/s)  ETA {eta/60:.0f} min", flush=True)
+            if on_checkpoint and done % checkpoint_interval == 0:
+                on_checkpoint(done, new_values, new_move_idxs, all_packed_masks, valid_mask)
+            if _stop_early:
+                print(f"  Stopping early at {done:,} / {n_slice:,}.", flush=True)
+                if on_checkpoint:
+                    on_checkpoint(done, new_values, new_move_idxs, all_packed_masks, valid_mask)
+                pool.terminate()
+                break
 
     elapsed = time.time() - t0
-    print(f"\nDone: {n_slice:,} positions in {elapsed:.0f}s  ({n_slice/elapsed:.0f} pos/s)")
+    print(f"\nDone: {done:,} positions in {elapsed:.0f}s  ({done/max(elapsed,1):.0f} pos/s)")
     if errors:
         print(f"WARNING: {errors} evaluation errors — these positions will be dropped at save time")
-    print(f"SF best moves used: {sf_move_hits:,} / {n_slice:,}  "
-          f"(fallback to human moves: {n_slice - sf_move_hits:,})")
+    print(f"SF best moves used: {sf_move_hits:,} / {done:,}  "
+          f"(fallback to human moves: {done - sf_move_hits:,})")
 
-    return new_values, new_move_idxs, all_packed_masks, valid_mask
+    return new_values[:done], new_move_idxs[:done], all_packed_masks[:done], valid_mask[:done], done
 
 
 def _apply_filter_and_save(
@@ -482,45 +510,64 @@ def reeval_chunk(dataset_path: str,
                  depth: int,
                  n: int,
                  seed: int,
-                 workers: int):
+                 workers: int,
+                 checkpoint_interval: int = 10_000):
     """
     Evaluate one chunk of positions and save a partial result file.
 
     All chunk jobs for the same dataset must use identical --n and --seed so
     that _load_and_sample produces the same sampled_idxs, making slices
     non-overlapping and covering the full set exactly.
+
+    Checkpoints are flushed to partial_out every checkpoint_interval positions
+    and on SIGTERM, so a wall-time kill preserves progress. The saved partial
+    records the actual end index evaluated — the merge job will report any
+    uncovered range so you can resubmit just that chunk.
     """
     print(f"=== Chunk {chunk_idx} / {n_chunks}  dataset={dataset_path} ===")
     state    = _load_and_sample(dataset_path, n, seed)
     n_total  = len(state["all_fens"])
     chunk_sz = (n_total + n_chunks - 1) // n_chunks   # ceiling division
     start    = chunk_idx * chunk_sz
-    end      = min(start + chunk_sz, n_total)
+    planned_end = min(start + chunk_sz, n_total)
 
     print(f"  Total positions: {n_total:,}  chunk size: {chunk_sz:,}")
-    print(f"  This chunk: [{start:,}, {end:,})  ({end-start:,} positions)")
+    print(f"  This chunk: [{start:,}, {planned_end:,})  ({planned_end-start:,} positions)")
 
-    fens_slice = state["all_fens"][start:end]
-    new_values, new_move_idxs, all_packed_masks, valid_mask = \
-        _run_sf_on_slice(fens_slice, stockfish_path, depth, workers)
+    fens_slice = state["all_fens"][start:planned_end]
 
-    partial = {
-        "chunk_idx":   chunk_idx,
-        "n_chunks":    n_chunks,
-        "n_total":     n_total,
-        "n":           n,
-        "seed":        seed,
-        "depth":       depth,
-        "start":       start,
-        "end":         end,
-        "new_values":       new_values,
-        "new_move_idxs":    new_move_idxs,
-        "all_packed_masks": all_packed_masks,
-        "valid_mask":       valid_mask,
-    }
-    torch.save(partial, partial_out)
+    def _save(done_count, vals, moves, masks, valid):
+        actual_end = start + done_count
+        partial = {
+            "chunk_idx":        chunk_idx,
+            "n_chunks":         n_chunks,
+            "n_total":          n_total,
+            "n":                n,
+            "seed":             seed,
+            "depth":            depth,
+            "start":            start,
+            "end":              actual_end,
+            "new_values":       vals[:done_count].clone(),
+            "new_move_idxs":    moves[:done_count].clone(),
+            "all_packed_masks": masks[:done_count].clone(),
+            "valid_mask":       valid[:done_count].clone(),
+        }
+        torch.save(partial, partial_out)
+        print(f"  Checkpoint → {partial_out}  [{start:,}, {actual_end:,})  ({done_count:,} positions)",
+              flush=True)
+
+    new_values, new_move_idxs, all_packed_masks, valid_mask, done = \
+        _run_sf_on_slice(fens_slice, stockfish_path, depth, workers,
+                         on_checkpoint=_save,
+                         checkpoint_interval=checkpoint_interval)
+
+    _save(done, new_values, new_move_idxs, all_packed_masks, valid_mask)
+    actual_end = start + done
     print(f"\nPartial saved → {partial_out}")
-    print(f"  chunk {chunk_idx}/{n_chunks}: positions [{start:,}, {end:,})")
+    print(f"  chunk {chunk_idx}/{n_chunks}: positions [{start:,}, {actual_end:,})  ({done:,} evaluated)")
+    if done < planned_end - start:
+        print(f"  WARNING: chunk incomplete — {planned_end - actual_end:,} positions not evaluated.")
+        print(f"  Merge will report the missing range. Resubmit CHUNK_IDX={chunk_idx} to complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +729,7 @@ def reeval(dataset_path: str,
     print(f"  Total positions to evaluate: {n_total:,}")
     print(f"\nStarting {workers} Stockfish worker(s) (depth={depth}) ...")
 
-    new_values, new_move_idxs, all_packed_masks, valid_mask = \
+    new_values, new_move_idxs, all_packed_masks, valid_mask, _ = \
         _run_sf_on_slice(state["all_fens"], stockfish_path, depth, workers)
 
     _apply_filter_and_save(
@@ -758,6 +805,9 @@ Modes
                     help="Merge mode: list of partial .pt files to combine into --out.")
 
     args = ap.parse_args()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT,  _handle_sigterm)
 
     if args.merge is not None:
         # Merge mode — no SF evaluation, just assemble partials and filter
