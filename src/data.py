@@ -39,7 +39,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, NamedTuple
 
 import numpy as np
 import chess
@@ -73,17 +73,27 @@ def _label_class(v: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Data record
+# Raw dataset — no Python object per position, just numpy arrays
 # ---------------------------------------------------------------------------
 
+class RawDataset(NamedTuple):
+    tensors:   np.ndarray   # (N, 14, 8, 8) uint8
+    values:    np.ndarray   # (N,) float32
+    move_idxs: np.ndarray   # (N,) int32
+    fens:      list         # list of str, length N
+    game_ids:  np.ndarray   # (N,) int32
+    plys:      np.ndarray   # (N,) int32
+
+
+# Keep Position for any external code that imports it
 @dataclass
 class Position:
-    tensor:   torch.Tensor  # (14, 8, 8) uint8  — binary, stored compact
-    value:    float         # label: +1.0, -0.1, or -1.0
-    move_idx: int           # move played from this position (from_sq*64 + to_sq)
-    fen:      str           # for debugging and deduplication
-    game_id:  int           # game index — used for train/val split
-    ply:      int           # half-move index within the game — used for validation ordering
+    tensor:   torch.Tensor
+    value:    float
+    move_idx: int
+    fen:      str
+    game_id:  int
+    ply:      int
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +163,6 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 continue
 
             if sampling == "even":
-                # Evenly spaced across the game arc — guarantees positions from
-                # opening, middlegame, and endgame in every game.
                 k = min(positions_per_game, len(candidates))
                 if k == 1:
                     indices = [candidates[0]]
@@ -179,9 +187,9 @@ def parse_pgn(pgn_path: str,
               positions_per_game: int = MAX_POSITIONS_PER_GAME,
               sampling: str = "random",
               checkpoint_path: str = "",
-              checkpoint_every: int = 0) -> List[Position]:
+              checkpoint_every: int = 0) -> RawDataset:
     """
-    Stream a PGN file and return a list of Position objects.
+    Stream a PGN file and return a RawDataset (numpy arrays, no per-position Python objects).
 
     Memory: pre-allocates uint8 tensor arrays (896 bytes/position instead
     of ~4.5KB for float32 Python objects). Converts to float32 at training time.
@@ -247,19 +255,14 @@ def parse_pgn(pgn_path: str,
     elapsed = time.time() - t0
     print(f"Done: {last_game_id+1:,} games, {count:,} positions in {elapsed:.1f}s")
 
-    # Convert to Position list (views into pre-allocated arrays — no copy)
-    positions = [
-        Position(
-            tensor=torch.from_numpy(tensor_buf[i]),
-            value=float(value_buf[i]),
-            move_idx=int(move_idx_buf[i]),
-            fen=fens[i],
-            game_id=game_ids[i],
-            ply=plys[i],
-        )
-        for i in range(count)
-    ]
-    return positions
+    return RawDataset(
+        tensors   = tensor_buf[:count],
+        values    = value_buf[:count],
+        move_idxs = move_idx_buf[:count],
+        fens      = fens,
+        game_ids  = np.array(game_ids, dtype=np.int32),
+        plys      = np.array(plys,     dtype=np.int32),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -268,28 +271,25 @@ def parse_pgn(pgn_path: str,
 
 KNOWN_POSITIONS = [
     # (fen, expected_value, tolerance, description)
-    # Starting position — unknown outcome, value near 0 after training,
-    # but label depends on game result so we can't check this directly.
-    # Instead we check the sign logic on unambiguous endgames.
     (
-        "4k3/8/8/8/8/8/8/4K2Q w - - 0 1",   # KQ vs K, White to move → White should win → +1
+        "4k3/8/8/8/8/8/8/4K2Q w - - 0 1",
         1.0, 0.0, "KQ vs K White to move: label must be +1.0 (White wins)"
     ),
     (
-        "4k3/8/8/8/8/8/8/4K2Q b - - 0 1",   # KQ vs K, Black to move → Black loses → -1
+        "4k3/8/8/8/8/8/8/4K2Q b - - 0 1",
         -1.0, 0.0, "KQ vs K Black to move: label must be -1.0 (Black loses)"
     ),
 ]
 
 
-def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
+def validate_dataset(dataset: RawDataset, strict: bool = True) -> bool:
     """
     Run all integrity checks. Prints a full report.
     Returns True if all checks pass. Raises ValueError if strict=True and any fail.
     """
     errors = []
     warnings = []
-    n = len(positions)
+    n = len(dataset.fens)
     print(f"\n{'='*60}")
     print(f"Dataset validation  ({n:,} positions)")
     print(f"{'='*60}")
@@ -297,11 +297,10 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     # ------------------------------------------------------------------
     # Check 1: label values are in the allowed set (tolerance for float32)
     # ------------------------------------------------------------------
-    bad_labels = [(i, p.value) for i, p in enumerate(positions)
-                  if _label_class(p.value) == "invalid"]
-    if bad_labels:
-        errors.append(f"CHECK 1 FAIL — {len(bad_labels)} invalid label values "
-                      f"(first 5: {[v for _, v in bad_labels[:5]]})")
+    bad_label_idx = [i for i in range(n) if _label_class(float(dataset.values[i])) == "invalid"]
+    if bad_label_idx:
+        errors.append(f"CHECK 1 FAIL — {len(bad_label_idx)} invalid label values "
+                      f"(first 5: {[float(dataset.values[i]) for i in bad_label_idx[:5]]})")
     else:
         print("CHECK 1 PASS — all labels in {+1.0, 0.0, -1.0}")
 
@@ -311,7 +310,6 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     sign_errors = 0
     for fen, expected, tol, desc in KNOWN_POSITIONS:
         board = chess.Board(fen)
-        # Simulate: if this were a win/loss game, what label would we assign?
         if expected == 1.0:
             simulated = outcome_to_value("1-0" if board.turn == chess.WHITE else "0-1", board.turn)
         elif expected == -1.0:
@@ -330,9 +328,9 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     # ------------------------------------------------------------------
     # Check 3: label distribution
     # ------------------------------------------------------------------
-    n_win  = sum(1 for p in positions if _label_class(p.value) == "win")
-    n_draw = sum(1 for p in positions if _label_class(p.value) == "draw")
-    n_loss = sum(1 for p in positions if _label_class(p.value) == "loss")
+    n_win  = sum(1 for v in dataset.values if _label_class(float(v)) == "win")
+    n_draw = sum(1 for v in dataset.values if _label_class(float(v)) == "draw")
+    n_loss = sum(1 for v in dataset.values if _label_class(float(v)) == "loss")
     pct_win  = 100 * n_win  / n
     pct_draw = 100 * n_draw / n
     pct_loss = 100 * n_loss / n
@@ -342,8 +340,6 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     print(f"  draw ( 0.0) : {n_draw:>8,}  ({pct_draw:5.1f}%)")
     print(f"  loss (-1.0) : {n_loss:>8,}  ({pct_loss:5.1f}%)")
 
-    # Win and loss should be approximately equal (since every win for one
-    # side is a loss for the other, and we sample both sides of each game)
     if abs(pct_win - pct_loss) > 15:
         warnings.append(f"CHECK 3 WARN — win/loss imbalance: {pct_win:.1f}% vs {pct_loss:.1f}%")
     if pct_win < 10 or pct_loss < 10:
@@ -352,10 +348,8 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     # ------------------------------------------------------------------
     # Check 4: side-to-move balance
     # ------------------------------------------------------------------
-    # STM encoding makes plane 12 always 1.0 for every position — it cannot
-    # be used to infer side to move. Parse the FEN directly instead.
     n_white_to_move = sum(
-        1 for p in positions if chess.Board(p.fen).turn == chess.WHITE
+        1 for fen in dataset.fens if chess.Board(fen).turn == chess.WHITE
     )
     n_black_to_move = n - n_white_to_move
     pct_white = 100 * n_white_to_move / n
@@ -373,14 +367,13 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
     king_errors = 0
     spot_check_n = min(2000, n)
     for i in range(spot_check_n):
-        p = positions[i]
-        wk = int(p.tensor[5].sum().item())   # plane 5 = STM king (always 1)
-        bk = int(p.tensor[11].sum().item())  # plane 11 = opponent king (always 1)
+        wk = int(dataset.tensors[i, 5].sum())
+        bk = int(dataset.tensors[i, 11].sum())
         if wk != 1 or bk != 1:
             king_errors += 1
             if king_errors <= 3:
                 errors.append(f"CHECK 5 FAIL — position {i} has "
-                              f"{wk} White kings, {bk} Black kings: {p.fen}")
+                              f"{wk} White kings, {bk} Black kings: {dataset.fens[i]}")
 
     if king_errors == 0:
         print(f"CHECK 5 PASS — king presence verified on {spot_check_n:,} positions "
@@ -389,43 +382,34 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
         errors.append(f"CHECK 5 FAIL — {king_errors} positions with wrong king count")
 
     # ------------------------------------------------------------------
-    # Check 6: sign consistency within a game
-    # Consecutive positions from the same game should have opposite signs
-    # (since the side to move alternates and the game result is fixed).
-    # Sample 100 games and verify.
+    # Check 6: sign consistency within a game (sample 100 games)
     # ------------------------------------------------------------------
-    game_positions: dict = {}
-    for p in positions:
-        game_positions.setdefault(p.game_id, []).append(p)
+    game_to_indices: dict = {}
+    for i in range(n):
+        gid = int(dataset.game_ids[i])
+        game_to_indices.setdefault(gid, []).append(i)
 
     sign_inconsistencies = 0
-    for gid, gpos in list(game_positions.items())[:100]:
-        gpos = sorted(gpos, key=lambda p: p.ply)
-        for a, b in zip(gpos, gpos[1:]):
-            if _label_class(a.value) == "draw" or _label_class(b.value) == "draw":
+    for gid, indices in list(game_to_indices.items())[:100]:
+        indices = sorted(indices, key=lambda i: int(dataset.plys[i]))
+        for ia, ib in zip(indices, indices[1:]):
+            va = _label_class(float(dataset.values[ia]))
+            vb = _label_class(float(dataset.values[ib]))
+            if va == "draw" or vb == "draw":
                 continue
-            # STM encoding makes plane 12 always 1.0 — use the FEN instead.
-            a_white = chess.Board(a.fen).turn == chess.WHITE
-            b_white = chess.Board(b.fen).turn == chess.WHITE
+            a_white = chess.Board(dataset.fens[ia]).turn == chess.WHITE
+            b_white = chess.Board(dataset.fens[ib]).turn == chess.WHITE
             if a_white == b_white:
-                # Same side to move → same label expected (both see win or both see loss)
-                if _label_class(a.value) != _label_class(b.value):
+                if va != vb:
                     sign_inconsistencies += 1
             else:
-                # Different side to move → labels must be opposite
-                if _label_class(a.value) == _label_class(b.value):
+                if va == vb:
                     sign_inconsistencies += 1
 
     if sign_inconsistencies == 0:
         print("CHECK 6 PASS — within-game label signs are consistent")
     else:
         errors.append(f"CHECK 6 FAIL — {sign_inconsistencies} within-game sign inconsistencies")
-
-    # ------------------------------------------------------------------
-    # Check 7: no duplicate FENs in validation set
-    # (Duplicates in training are tolerable; in val they inflate metrics.)
-    # ------------------------------------------------------------------
-    # (Checked after split — reported in save_dataset)
 
     # ------------------------------------------------------------------
     # Summary
@@ -450,7 +434,7 @@ def validate_dataset(positions: List[Position], strict: bool = True) -> bool:
 # Train / val split and save
 # ---------------------------------------------------------------------------
 
-def split_and_save(positions: List[Position],
+def split_and_save(dataset: RawDataset,
                    out_path: str,
                    val_fraction: float = VAL_FRACTION,
                    seed: int = 42,
@@ -460,50 +444,69 @@ def split_and_save(positions: List[Position],
     """
     Split at game level (no leakage), validate val set for duplicates,
     and save to disk with a metadata sidecar.
+
+    Works directly from RawDataset numpy arrays to avoid peak memory from
+    torch.stack while the original buffer is still alive.
     """
     rng = random.Random(seed)
+    n = len(dataset.fens)
 
-    all_game_ids = list({p.game_id for p in positions})
-    rng.shuffle(all_game_ids)
-    n_val_games = max(1, int(len(all_game_ids) * val_fraction))
-    val_game_ids = set(all_game_ids[:n_val_games])
+    unique_gids = np.unique(dataset.game_ids)
+    gid_list = unique_gids.tolist()
+    rng.shuffle(gid_list)
+    n_val_games = max(1, int(len(gid_list) * val_fraction))
+    val_gid_set = set(gid_list[:n_val_games])
 
-    train = [p for p in positions if p.game_id not in val_game_ids]
-    val   = [p for p in positions if p.game_id in val_game_ids]
+    val_mask   = np.isin(dataset.game_ids, np.array(list(val_gid_set), dtype=np.int32))
+    train_mask = ~val_mask
+
+    n_train = int(train_mask.sum())
+    n_val   = int(val_mask.sum())
+    n_train_games = len(gid_list) - n_val_games
+    print(f"\nSplit: {n_train:,} train  /  {n_val:,} val  "
+          f"(from {n_train_games} / {n_val_games} games)")
+
+    train_fens = [dataset.fens[i] for i in range(n) if train_mask[i]]
+    val_fens   = [dataset.fens[i] for i in range(n) if val_mask[i]]
 
     # Duplicate FEN check in val set
-    val_fens = [p.fen for p in val]
     n_val_dupes = len(val_fens) - len(set(val_fens))
     if n_val_dupes > 0:
         print(f"WARNING: {n_val_dupes} duplicate FENs in validation set")
 
-    # Cross-contamination check: no FEN should appear in both sets
-    train_fens = set(p.fen for p in train)
-    val_fens_set = set(val_fens)
-    overlap = train_fens & val_fens_set
+    # Cross-contamination check
+    train_fens_set = set(train_fens)
+    val_fens_set   = set(val_fens)
+    overlap = train_fens_set & val_fens_set
     if overlap:
         print(f"WARNING: {len(overlap)} FENs appear in both train and val "
               f"(same board position, different games — tolerable)")
 
-    print(f"\nSplit: {len(train):,} train  /  {len(val):,} val  "
-          f"(from {len(all_game_ids) - n_val_games} / {n_val_games} games)")
-
-    # Save
-    def pack(subset):
-        return {
-            # uint8 on disk — convert to float32 in DataLoader via .float()
-            "tensors":   torch.stack([p.tensor for p in subset]),   # (N, 14, 8, 8) uint8
-            "values":    torch.tensor([p.value    for p in subset], dtype=torch.float32),
-            "move_idxs": torch.tensor([p.move_idx for p in subset], dtype=torch.long),
-            "fens":      [p.fen for p in subset],
-        }
+    # Slice numpy arrays directly — bool indexing creates contiguous copies,
+    # so tensor_buf can be freed as soon as we have both slices.
+    train_tensors   = dataset.tensors[train_mask]
+    val_tensors     = dataset.tensors[val_mask]
+    train_values    = dataset.values[train_mask]
+    val_values      = dataset.values[val_mask]
+    train_moveidxs  = dataset.move_idxs[train_mask]
+    val_moveidxs    = dataset.move_idxs[val_mask]
 
     data = {
-        "train": pack(train),
-        "val":   pack(val),
+        "train": {
+            "tensors":   torch.from_numpy(train_tensors),
+            "values":    torch.from_numpy(train_values),
+            "move_idxs": torch.from_numpy(train_moveidxs).long(),
+            "fens":      train_fens,
+        },
+        "val": {
+            "tensors":   torch.from_numpy(val_tensors),
+            "values":    torch.from_numpy(val_values),
+            "move_idxs": torch.from_numpy(val_moveidxs).long(),
+            "fens":      val_fens,
+        },
         "meta": {
-            "n_train":         len(train),
-            "n_val":           len(val),
+            "n_train":         n_train,
+            "n_val":           n_val,
             "val_fraction":    val_fraction,
             "label_values":    list(VALID_LABEL_VALUES),
             "draw_value":      0.0,
@@ -518,7 +521,6 @@ def split_and_save(positions: List[Position],
     torch.save(data, out_path)
     print(f"Saved → {out_path}")
 
-    # Human-readable sidecar
     meta_path = out_path.replace(".pt", "_meta.json")
     with open(meta_path, "w") as f:
         json.dump(data["meta"], f, indent=2)
@@ -529,9 +531,6 @@ def split_and_save(positions: List[Position],
 # CLI
 # ---------------------------------------------------------------------------
 
-# Global flag set by SIGTERM handler — checked in the parse loop so the job
-# exits cleanly and saves whatever it has collected, rather than being killed
-# mid-run with no output (the LSF wall-time kill scenario).
 _stop_early = False
 
 def _handle_sigterm(signum, frame):
@@ -546,41 +545,63 @@ def _save_raw_checkpoint(tensor_buf, value_buf, move_idx_buf, fens,
     """
     Fast checkpoint from live numpy buffers — no Position objects, no validation.
     Written every N games and on SIGINT so progress survives SIGKILL.
-    Load with torch.load and convert via _checkpoint_to_positions().
+    Load with torch.load and pass to _raw_checkpoint_to_dataset().
+
+    Saves numpy views (not copies) — pickle serializes only the filled slice.
     """
     tmp = path + ".tmp"
     torch.save({
-        "tensor_buf":   tensor_buf[:count].copy(),
-        "value_buf":    value_buf[:count].copy(),
-        "move_idx_buf": move_idx_buf[:count].copy(),
-        "fens":         list(fens),
-        "game_ids":     list(game_ids),
-        "plys":         list(plys),
+        "tensor_buf":   tensor_buf[:count],   # view — pickle writes only count rows
+        "value_buf":    value_buf[:count],
+        "move_idx_buf": move_idx_buf[:count],
+        "fens":         fens,
+        "game_ids":     game_ids,
+        "plys":         plys,
         "n_positions":  count,
         "n_games":      n_games,
     }, tmp)
-    os.replace(tmp, path)   # atomic on POSIX
+    os.replace(tmp, path)
     print(f"  [ckpt] {n_games:,} games / {count:,} positions → {path}", flush=True)
 
 
-def _checkpoint_to_positions(ckpt: dict) -> "List[Position]":
+def _raw_checkpoint_to_dataset(ckpt: dict) -> RawDataset:
+    n = ckpt["n_positions"]
     tb  = ckpt["tensor_buf"]
     vb  = ckpt["value_buf"]
     mb  = ckpt["move_idx_buf"]
     fns = ckpt["fens"]
     gids = ckpt["game_ids"]
     plss = ckpt["plys"]
-    n   = ckpt["n_positions"]
+
+    # Convert list game_ids/plys to numpy if they came from an old checkpoint format
+    if isinstance(gids, list):
+        gids = np.array(gids, dtype=np.int32)
+    if isinstance(plss, list):
+        plss = np.array(plss, dtype=np.int32)
+
+    return RawDataset(
+        tensors   = tb[:n] if isinstance(tb, np.ndarray) else tb[:n].numpy(),
+        values    = vb[:n] if isinstance(vb, np.ndarray) else vb[:n].numpy(),
+        move_idxs = mb[:n] if isinstance(mb, np.ndarray) else mb[:n].numpy(),
+        fens      = list(fns[:n]) if hasattr(fns, '__getitem__') else fns,
+        game_ids  = gids[:n],
+        plys      = plss[:n],
+    )
+
+
+# Keep old name as alias for backward compatibility
+def _checkpoint_to_positions(ckpt: dict) -> List[Position]:
+    ds = _raw_checkpoint_to_dataset(ckpt)
     return [
         Position(
-            tensor   = torch.from_numpy(tb[i]),
-            value    = float(vb[i]),
-            move_idx = int(mb[i]),
-            fen      = fns[i],
-            game_id  = gids[i],
-            ply      = plss[i],
+            tensor   = torch.from_numpy(ds.tensors[i].copy()),
+            value    = float(ds.values[i]),
+            move_idx = int(ds.move_idxs[i]),
+            fen      = ds.fens[i],
+            game_id  = int(ds.game_ids[i]),
+            ply      = int(ds.plys[i]),
         )
-        for i in range(n)
+        for i in range(len(ds.fens))
     ]
 
 
@@ -589,7 +610,7 @@ def main():
     signal.signal(signal.SIGINT,  _handle_sigterm)
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pgn",           required=True,        help="Path to PGN file")
+    ap.add_argument("--pgn",           required=False,       help="Path to PGN file")
     ap.add_argument("--out",           default="dataset.pt", help="Output .pt path")
     ap.add_argument("--max-games",     type=int, default=100_000)
     ap.add_argument("--min-elo",       type=int, default=1500,
@@ -609,8 +630,7 @@ def main():
                          "Lower = include earlier positions.")
     ap.add_argument("--sampling",      choices=["random", "even"], default="random",
                     help="'random': sample uniformly at random (default). "
-                         "'even': evenly spaced across game arc — guarantees "
-                         "positions from opening, middlegame, and endgame.")
+                         "'even': evenly spaced across game arc.")
     ap.add_argument("--checkpoint-every", type=int, default=10_000,
                     help="Save a raw checkpoint every N games (default 10000). "
                          "Survives SIGKILL at wall-time. Set 0 to disable.")
@@ -625,9 +645,11 @@ def main():
         print(f"Loading checkpoint: {args.from_checkpoint}")
         ckpt = torch.load(args.from_checkpoint, weights_only=False)
         print(f"  {ckpt['n_games']:,} games / {ckpt['n_positions']:,} positions")
-        positions = _checkpoint_to_positions(ckpt)
+        dataset = _raw_checkpoint_to_dataset(ckpt)
     else:
-        positions = parse_pgn(
+        if not args.pgn:
+            ap.error("--pgn is required unless --from-checkpoint is set")
+        dataset = parse_pgn(
             pgn_path=args.pgn,
             max_games=args.max_games,
             min_elo=args.min_elo,
@@ -640,14 +662,14 @@ def main():
             checkpoint_every=args.checkpoint_every,
         )
 
-    if not positions:
+    if not dataset.fens:
         print("No positions extracted. Check PGN path and filters.")
         sys.exit(1)
 
-    validate_dataset(positions, strict=not args.no_strict)
+    validate_dataset(dataset, strict=not args.no_strict)
 
     if not args.validate_only:
-        split_and_save(positions, args.out, seed=args.seed,
+        split_and_save(dataset, args.out, seed=args.seed,
                        skip_opening=args.skip_opening,
                        positions_per_game=args.positions_per_game,
                        sampling=args.sampling)
