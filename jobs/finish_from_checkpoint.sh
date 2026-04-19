@@ -3,7 +3,7 @@
 #BSUB -q hpc
 #BSUB -n 1
 #BSUB -R "rusage[mem=16GB]"
-#BSUB -W 1:00
+#BSUB -W 4:00
 #BSUB -o /zhome/81/b/206091/logs/finish_dataset_%J.out
 #BSUB -e /zhome/81/b/206091/logs/finish_dataset_%J.err
 
