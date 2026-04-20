@@ -505,6 +505,9 @@ def run_ablation(model: Optional[PetraNet], n_games: int = 100,
 
     for step in steps:
         desc, matchup = ABLATION_STEPS[step]
+        if step == 5 and baseline_model_path:
+            baseline_name = os.path.basename(os.path.dirname(baseline_model_path))
+            matchup = f"MCTS(learned) vs MCTS({baseline_name})"
         print(f"\n--- Step {step}: {desc} ({matchup}) ---")
 
         if step == 1:
