@@ -8,8 +8,8 @@
 #BSUB -e /zhome/81/b/206091/logs/reeval_merge_%J.err
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Must match the values used in reeval_depth20.sh:
-#   MONTH=03 YEAR=2020 bsub < jobs/reeval_merge.sh
+# Must match the values used in reeval_depth18.sh:
+#   bsub -env "MONTH=03,YEAR=2023" < jobs/reeval_merge.sh
 
 MONTH="${MONTH:-03}"
 YEAR="${YEAR:-2020}"

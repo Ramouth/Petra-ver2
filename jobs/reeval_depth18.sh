@@ -9,14 +9,15 @@
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 # Set MONTH, YEAR, and CHUNK_IDX before submitting.
-# Submit one job per chunk (0, 1, 2), all with same MONTH/YEAR:
+# Use -env to pass variables — plain "VAR=val bsub < script" is unreliable on
+# some LSF configurations and the job will silently fall back to defaults.
 #
-#   MONTH=03 YEAR=2023 CHUNK_IDX=0 bsub < jobs/reeval_depth18.sh
-#   MONTH=03 YEAR=2023 CHUNK_IDX=1 bsub < jobs/reeval_depth18.sh
-#   MONTH=03 YEAR=2023 CHUNK_IDX=2 bsub < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=0" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=1" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=2" < jobs/reeval_depth18.sh
 #
 # After all 3 finish, run the merge job:
-#   MONTH=03 YEAR=2023 bsub < jobs/reeval_merge.sh
+#   bsub -env "MONTH=03,YEAR=2023" < jobs/reeval_merge.sh
 #
 # If a chunk hits the wall, it saves a checkpoint with however far it got.
 # The merge will report which positions are missing — resubmit that CHUNK_IDX.
