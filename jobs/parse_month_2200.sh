@@ -14,10 +14,12 @@ YEAR="${YEAR:-2023}"
 # ELO filter — lower = more decisive positions, better value range coverage.
 #   2500+ ELO games are too balanced: SF labels cluster near 0, compressing
 #   the geometry and hurting value calibration (see lichess_2023_03 regression).
-#   2000+ gives more decisive games while still filtering out noise.
-#   2020 (~15M games/month):  2000+ gives ~200-500k qualifying games
-#   2023 (~108M games/month): 2000+ gives millions — abundance not a concern
-MIN_ELO="${MIN_ELO:-2000}"
+#   1850 is the target: enough decisive games to give geometry signal while
+#   retaining draws and complex middlegame positions for breadth (slow staircase).
+#   Hard-filtering by piece count or decisive-only collapses the complexity
+#   that geometry also needs — 1850 gives the combination naturally.
+#   2023 (~108M games/month): 1850+ gives tens of millions — abundance fine.
+MIN_ELO="${MIN_ELO:-1850}"
 
 # How many qualifying games to keep.
 # With 108M games and min_elo=2000, qualifying games are plentiful — 100k is fine.
@@ -65,6 +67,6 @@ python3 -u "${SRC}/data.py" \
 echo
 echo "Done. Output: ${OUT_FILE}"
 echo "Next step: submit 3 chunk jobs:"
-echo "  MONTH=${MONTH} YEAR=${YEAR} CHUNK_IDX=0 bsub < jobs/reeval_depth20.sh"
-echo "  MONTH=${MONTH} YEAR=${YEAR} CHUNK_IDX=1 bsub < jobs/reeval_depth20.sh"
-echo "  MONTH=${MONTH} YEAR=${YEAR} CHUNK_IDX=2 bsub < jobs/reeval_depth20.sh"
+echo "  MONTH=${MONTH} YEAR=${YEAR} CHUNK_IDX=0 bsub < jobs/reeval_depth18.sh"
+echo "  MONTH=${MONTH} YEAR=${YEAR} CHUNK_IDX=1 bsub < jobs/reeval_depth18.sh"
+echo "  MONTH=${MONTH} YEAR=${YEAR} CHUNK_IDX=2 bsub < jobs/reeval_depth18.sh"
