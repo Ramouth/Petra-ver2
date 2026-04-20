@@ -629,6 +629,53 @@ Changes from Round 2 (sf_balanced):
 
 ---
 
+## Session 10 — Fork: Decisiveness Zigzag (2026-04-20)
+
+### Context
+
+lichess_2023_03 trained on SF depth-18 labels showed geometry regression vs feb_sf
+(rank 17.1 vs 18.9, loss·draw cosine 0.4550). Root cause: 2500+ ELO filter produces
+a value distribution too compressed near zero — geometry has no signal to separate
+win/draw/loss. Fix in progress: re-parse with 2000+ ELO, retrain from feb_sf.
+
+The endgame-first curriculum (Doover 2 Round 1) was dropped — it collapsed rank to
+1.0. The position-type chunking idea evolved into a simpler approach that uses only
+real game positions already in the SF-labeled dataset.
+
+### Proposed: Decisiveness Zigzag
+
+Instead of synthetic endgames or separate position-type datasets, zigzag between
+decisiveness-filtered subsets of the same SF-labeled dataset:
+
+```
+Stage 1: train on |v| > 0.7  (most decisive)   → forces win/loss axis apart
+Stage 2: train on |v| > 0.5  (decisive)         → expands axis, adds gradation
+Stage 3: train on all positions                  → full rank expansion with draws
+```
+
+Each stage fine-tunes from the previous. Decisive positions come from real sampled
+games — no artificial generation needed. The SF-reeval'd dataset already has
+continuous labels so filtering is a threshold, not a new pipeline step.
+
+**Why this avoids past failures:**
+- Pure endgame training (Doover 2 R1): collapsed to 1D because binary labels
+- Pure 2500-ELO SF training (lichess_2023_03): compressed because too few decisive
+- Decisiveness zigzag: starts sharp (geometry forced apart), then broadens (rank expands)
+
+**Gate at each stage:** effective rank must increase before advancing to the next.
+If rank stalls between stages → step size is too large, add an intermediate threshold.
+
+### Fork condition (eval pending 2026-04-20)
+
+lichess_2023_03 vs feb_sf head-to-head result determines priority:
+
+- **lichess_2023_03 wins >50%**: geometry regression is noise for ELO; proceed with
+  re-parse (2000+ ELO) + retrain from feb_sf, then add decisiveness zigzag on top.
+- **lichess_2023_03 loses**: geometry regression actively hurts ELO; decisiveness
+  zigzag is critical path, not optional.
+
+---
+
 ## Long-Term Phases
 
 | Phase | Goal |
