@@ -665,6 +665,16 @@ continuous labels so filtering is a threshold, not a new pipeline step.
 **Gate at each stage:** effective rank must increase before advancing to the next.
 If rank stalls between stages → step size is too large, add an intermediate threshold.
 
+### Parse strategy revision (2026-04-20)
+
+Hard-filtering by piece count (decisive endgames only) was rejected — tried previously
+and collapses complexity. The correct approach is a **slow staircase via ELO**:
+parse at MIN_ELO=1850, which naturally mixes decisive and drawn positions across all
+game phases. Lower ELO → more blunders/material imbalances → SF labels spread across
+full range without removing the breadth geometry also needs.
+
+Job: `parse_month_2200.sh` (name is a historical artefact — it now defaults to 1850).
+
 ### Fork condition (eval pending 2026-04-20)
 
 lichess_2023_03 vs feb_sf head-to-head result determines priority:
