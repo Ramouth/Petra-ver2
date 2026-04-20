@@ -113,7 +113,9 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 require_normal_termination: bool, rng: random.Random,
                 skip_opening: int = SKIP_OPENING_MOVES,
                 positions_per_game: int = MAX_POSITIONS_PER_GAME,
-                sampling: str = "random"):
+                sampling: str = "random",
+                max_pieces: int = 0,
+                decisive_only: bool = False):
     """
     Generator. Yields (game_id, result, [(board, move), ...]) for each
     accepted game. Applies all game-level filters inline.
@@ -135,6 +137,10 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 if term and term.lower() not in ("normal", ""):
                     games_skipped += 1
                     continue
+
+            if decisive_only and result == "1/2-1/2":
+                games_skipped += 1
+                continue
 
             if min_elo > 0:
                 try:
@@ -158,6 +164,9 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 continue
 
             candidates = list(range(skip_opening, n))
+            if max_pieces > 0:
+                candidates = [i for i in candidates
+                              if len(pairs[i][0].piece_map()) <= max_pieces]
             if not candidates:
                 games_skipped += 1
                 continue
@@ -187,7 +196,9 @@ def parse_pgn(pgn_path: str,
               positions_per_game: int = MAX_POSITIONS_PER_GAME,
               sampling: str = "random",
               checkpoint_path: str = "",
-              checkpoint_every: int = 0) -> RawDataset:
+              checkpoint_every: int = 0,
+              max_pieces: int = 0,
+              decisive_only: bool = False) -> RawDataset:
     """
     Stream a PGN file and return a RawDataset (numpy arrays, no per-position Python objects).
 
@@ -223,7 +234,7 @@ def parse_pgn(pgn_path: str,
     for game_id, result, sampled_pairs in _iter_games(
             pgn_path, max_games, min_elo, require_normal_termination, rng,
             skip_opening=skip_opening, positions_per_game=positions_per_game,
-            sampling=sampling):
+            sampling=sampling, max_pieces=max_pieces, decisive_only=decisive_only):
 
         if _stop_early:
             print(f"\n  Signal received — stopping after {game_id:,} games.", flush=True)
@@ -631,6 +642,12 @@ def main():
     ap.add_argument("--sampling",      choices=["random", "even"], default="random",
                     help="'random': sample uniformly at random (default). "
                          "'even': evenly spaced across game arc.")
+    ap.add_argument("--max-pieces",     type=int, default=0,
+                    help="Only sample positions with ≤ N pieces on board (0 = no filter). "
+                         "Use 16 for endgame-only positions.")
+    ap.add_argument("--decisive-only",  action="store_true",
+                    help="Skip drawn games (result=1/2-1/2). "
+                         "Maximises decisive SF labels for geometry bootstrap.")
     ap.add_argument("--checkpoint-every", type=int, default=10_000,
                     help="Save a raw checkpoint every N games (default 10000). "
                          "Survives SIGKILL at wall-time. Set 0 to disable.")
@@ -660,6 +677,8 @@ def main():
             sampling=args.sampling,
             checkpoint_path=ckpt_path,
             checkpoint_every=args.checkpoint_every,
+            max_pieces=args.max_pieces,
+            decisive_only=args.decisive_only,
         )
 
     if not dataset.fens:
