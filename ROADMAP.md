@@ -675,6 +675,23 @@ full range without removing the breadth geometry also needs.
 
 Job: `parse_month_2200.sh` (name is a historical artefact — it now defaults to 1850).
 
+### SF label distribution — old vs new dataset
+
+Measured on `dataset_2023_03_sf18.pt` (2500 ELO, OOM-killed at 80k/100k games):
+
+| Metric | Value |
+|--------|-------|
+| Total positions | 284,866 |
+| Near-zero \|v\|<0.1 | 87,239 (30.6%) |
+| Decisive \|v\|>0.7 | 71,982 (25.3%) |
+
+30.6% of positions were essentially balanced — geometry had no signal to push
+win/loss apart. Combined with the tiny dataset (OOM cut it to 285k), this explains
+both the rank regression (17.1 vs 18.9) and ELO drop.
+
+Target after 1850 ELO reeval: near-zero <20%, decisive >35%. Run same check after
+merge to confirm before training.
+
 ### Fork condition (eval pending 2026-04-20)
 
 lichess_2023_03 vs feb_sf head-to-head result determines priority:
