@@ -30,7 +30,7 @@ module load cuda/12.1
 BLACKHOLE="/dtu/blackhole/0b/206091"
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
-    --dataset      ${BLACKHOLE}/dataset_2023_03.pt \
+    --dataset      ${BLACKHOLE}/dataset_2023_03_sf18.pt \
     --rank-reg     0.1 \
     --num-workers  0 \
     --weight-decay 5e-4 \
