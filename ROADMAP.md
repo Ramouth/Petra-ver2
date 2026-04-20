@@ -751,6 +751,35 @@ hyperbolic disk, leaving no room for subtler structure to develop.
 Poincaré embeddings is only warranted once L2 geometry has been pushed to its
 ceiling and the ceiling is measured.
 
+### Topological concept probes — ideas (implement later)
+
+These probes are only meaningful once two preconditions are met:
+
+- **ELO ≥ 1700**: below this, geometry likely reflects blunder detection rather
+  than positional concepts. A probe that fires on "side with more material wins"
+  is not a concept probe.
+- **Effective rank ≥ 30**: fewer dimensions means concept probes risk fitting to
+  collapsed or random dimensions rather than structured representations. Results
+  would not be interpretable.
+
+Probe ideas, roughly ordered by implementation cost:
+
+1. **Linear concept probes** — label positions for a specific concept (passed pawn,
+   bishop pair, open file, king exposure) and train a linear classifier on bottleneck
+   embeddings. Success = concept is geometrically encoded and linearly separable.
+2. **Transition consistency** — embed full game sequences and measure path smoothness.
+   Adjacent positions via legal moves should trace continuous trajectories. Jumpy paths
+   mean geometry-driven search would be incoherent.
+3. **Loop identification (β1 → chess meaning)** — sample positions sitting on
+   persistent cycles. Do they correspond to repetition draws, fortress structures,
+   zugzwang? Connects measured topology to actual chess logic.
+4. **Phase clustering** — partition by game phase (opening/middlegame/endgame) and
+   measure topological distance between clouds. Tests whether the manifold has learned
+   game structure or just value.
+5. **UMAP/t-SNE coloured by concept** — qualitative, project 128→2D and colour by
+   material balance, phase, or outcome. Visual sanity check before committing to
+   quantitative probes.
+
 ---
 
 ## Long-Term Phases
