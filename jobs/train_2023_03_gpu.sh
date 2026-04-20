@@ -12,26 +12,27 @@ source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
 module load cuda/12.1
 
-# Training on Lichess 2023-03, 2500+ ELO, draw=0.0.
+# Training on Lichess 2023-03, 2000+ ELO, SF depth-18 labels.
 #
 # Key changes vs feb_sf:
-#   - draw label fixed to 0.0 (was -0.1) — draws now sit at the geometric
-#     origin, cleanly separated from the loss cluster
-#   - 2500+ ELO filter (vs 2200) — stronger players, more decisive positions
-#   - ~2M positions from game outcomes (no SF relabelling)
+#   - Initialised from feb_sf/best.pt — fine-tunes the existing geometry
+#   - 2000+ ELO filter (vs 2500) — broader value distribution, more decisive
+#     games, better endgame calibration
+#   - draw label 0.0 (was -0.1 in feb_sf game-outcome data)
+#   - epochs=50: let patience=5 control stopping, not a hard ceiling
 #
-# Geometry gate (run probe_geometry.sh after training):
+# Geometry gate (run probe_geometry_2023_03.sh after training):
 #   - Effective rank > 20 (target: >30)
-#   - win·draw cosine closer to 0 than feb_sf (0.1676)
-#
-# If rank plateaus near feb_sf levels despite clean data, the architecture
-# (64ch × 4 blocks, shared policy/value bottleneck) is likely the ceiling.
+#   - win·draw cosine (strict) < 0.1676 (feb_sf baseline)
+#   - loss·draw cosine < 0.4550 (lichess_2023_03 baseline — draws must separate)
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --dataset      ${BLACKHOLE}/dataset_2023_03_sf18.pt \
+    --init-model   /zhome/81/b/206091/Petra-ver2/models/feb_sf/best.pt \
     --rank-reg     0.1 \
     --num-workers  0 \
     --weight-decay 5e-4 \
+    --epochs       50 \
     --out          /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03

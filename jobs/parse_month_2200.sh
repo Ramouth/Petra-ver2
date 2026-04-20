@@ -11,14 +11,16 @@
 MONTH="${MONTH:-03}"
 YEAR="${YEAR:-2023}"
 
-# ELO filter — scales with dataset size:
-#   2020 (~15M games/month):  2200+ gives ~30-80k qualifying games
-#   2023 (~108M games/month): 2500+ gives ~100k+ qualifying games — use the abundance
-MIN_ELO="${MIN_ELO:-2500}"
+# ELO filter — lower = more decisive positions, better value range coverage.
+#   2500+ ELO games are too balanced: SF labels cluster near 0, compressing
+#   the geometry and hurting value calibration (see lichess_2023_03 regression).
+#   2000+ gives more decisive games while still filtering out noise.
+#   2020 (~15M games/month):  2000+ gives ~200-500k qualifying games
+#   2023 (~108M games/month): 2000+ gives millions — abundance not a concern
+MIN_ELO="${MIN_ELO:-2000}"
 
 # How many qualifying games to keep.
-# With 108M games and min_elo=2500, stopping at 300k games is a small fraction
-# of what's available — no need to scan the whole file.
+# With 108M games and min_elo=2000, qualifying games are plentiful — 100k is fine.
 MAX_GAMES="${MAX_GAMES:-100000}"
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
@@ -30,9 +32,9 @@ OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}.pt"
 
 # ── Wall time note ─────────────────────────────────────────────────────────────
 # March 2023 PGN is large (~50-100GB compressed). The parser scans sequentially
-# and stops once MAX_GAMES qualifying games are found. At 2500+ ELO, qualifying
-# games are ~0.1-0.5% of the file, so expect to scan ~60-300M games to collect
-# 300k. Empirically this takes 4-10h — set wall to 12h to be safe.
+# and stops once MAX_GAMES qualifying games are found. At 2000+ ELO, qualifying
+# games are ~1-5% of the file — much faster to find 100k than at 2500+.
+# Empirically 2-4h — 24h wall is conservative.
 
 echo "=== Parsing Lichess ${YEAR}-${MONTH} (min_elo=${MIN_ELO}, max_games=${MAX_GAMES}) ==="
 echo "PGN:  ${PGN_FILE}"
