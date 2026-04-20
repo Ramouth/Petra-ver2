@@ -9,12 +9,13 @@
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 # Must match the values used in reeval_depth18.sh:
-#   bsub -env "MONTH=03,YEAR=2023" < jobs/reeval_merge.sh
+#   bsub -env "MONTH=03,YEAR=2023,DEPTH=18,N_CHUNKS=3,N=300000" < jobs/reeval_merge.sh
 
 MONTH="${MONTH:-03}"
-YEAR="${YEAR:-2020}"
-N_CHUNKS=6
-N=800000
+YEAR="${YEAR:-2023}"
+DEPTH="${DEPTH:-18}"
+N_CHUNKS="${N_CHUNKS:-3}"
+N="${N:-300000}"
 SEED=42
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
@@ -22,12 +23,12 @@ HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
 IN_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}.pt"
-OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}_sf20.pt"
+OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}_sf${DEPTH}.pt"
 
 # Build the list of partial files
 PARTIALS=""
 for i in $(seq 0 $((N_CHUNKS - 1))); do
-    PART="${BLACKHOLE}/reeval_${YEAR}_${MONTH}_d20_part${i}.pt"
+    PART="${BLACKHOLE}/reeval_${YEAR}_${MONTH}_d${DEPTH}_part${i}.pt"
     if [ ! -f "${PART}" ]; then
         echo "ERROR: missing partial file: ${PART}"
         echo "Ensure all ${N_CHUNKS} chunk jobs have completed."
@@ -36,7 +37,7 @@ for i in $(seq 0 $((N_CHUNKS - 1))); do
     PARTIALS="${PARTIALS} ${PART}"
 done
 
-echo "=== Merging ${N_CHUNKS} chunks → ${OUT_FILE} ==="
+echo "=== Merging ${N_CHUNKS} chunks (depth ${DEPTH}) → ${OUT_FILE} ==="
 echo "Partials:${PARTIALS}"
 echo
 
