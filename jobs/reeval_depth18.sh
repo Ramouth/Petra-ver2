@@ -15,8 +15,9 @@
 #   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=0" < jobs/reeval_depth18.sh
 #   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=1" < jobs/reeval_depth18.sh
 #   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=2" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=3" < jobs/reeval_depth18.sh
 #
-# After all 3 finish, run the merge job:
+# After all 4 finish, run the merge job:
 #   bsub -env "MONTH=03,YEAR=2023" < jobs/reeval_merge.sh
 #
 # If a chunk hits the wall, it saves a checkpoint with however far it got.
@@ -25,8 +26,8 @@
 MONTH="${MONTH:-03}"
 YEAR="${YEAR:-2023}"
 CHUNK_IDX="${CHUNK_IDX:-0}"
-N_CHUNKS=3          # 300k positions / 3 = 100k per chunk → ~3-4h at depth 18
-N=300000
+N_CHUNKS=4          # 800k positions / 4 = 200k per chunk → ~6-8h at depth 18
+N=800000
 SEED=42
 
 BLACKHOLE="/dtu/blackhole/0b/206091"

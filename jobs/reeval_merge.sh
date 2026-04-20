@@ -9,13 +9,13 @@
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 # Must match the values used in reeval_depth18.sh:
-#   bsub -env "MONTH=03,YEAR=2023,DEPTH=18,N_CHUNKS=3,N=300000" < jobs/reeval_merge.sh
+#   bsub -env "MONTH=03,YEAR=2023,DEPTH=18,N_CHUNKS=4,N=800000" < jobs/reeval_merge.sh
 
 MONTH="${MONTH:-03}"
 YEAR="${YEAR:-2023}"
 DEPTH="${DEPTH:-18}"
-N_CHUNKS="${N_CHUNKS:-3}"
-N="${N:-300000}"
+N_CHUNKS="${N_CHUNKS:-4}"
+N="${N:-800000}"
 SEED=42
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
