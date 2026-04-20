@@ -703,6 +703,56 @@ lichess_2023_03 vs feb_sf head-to-head result determines priority:
 
 ---
 
+## Theoretical Section — Geometry Architecture (2026-04-20)
+
+### What L2 normalization can and cannot do
+
+L2 normalization constrains all embeddings to a unit hypersphere. In the best case
+this produces a clean three-way separation of win/draw/loss centroids. Realistically,
+the most likely outcome is a win/loss hyperplane — draw is harder to anchor because
+drawn positions are rarer and less decisive in the training signal.
+
+This is still extremely valuable as a proof of concept: a learned win/loss axis on a
+unit sphere, driven by SF labels, is a non-trivial geometric structure. The ceiling
+of L2 is dimensional separation — a hypersphere is the wrong space for the full
+richness of chess positional structure, but it is the right place to start.
+
+**Current strategy:** push L2 separation as far as possible (rank, cosine gates,
+staircase training), and probe topology as thoroughly as possible. Establish what
+L2 can achieve before replacing it.
+
+### Topology as the deeper signal
+
+Rank and centroid cosines measure whether the manifold is spread out. Topology
+measures whether it has the right *shape*. A rank-30 manifold can still be
+topologically trivial — one undifferentiated blob. Topology probing (β0, β1,
+persistence) should be treated as a primary gate alongside rank, not a secondary
+diagnostic.
+
+Open questions to resolve with current architecture before moving on:
+- Do win/draw/loss form topologically distinct regions or a single gradient?
+- Are game transitions locally consistent (adjacent positions close in the manifold)?
+- Does β1 reflect chess concepts (repetition, fortress, zugzwang) or noise?
+- How does topology evolve across staircase stages?
+
+### Future direction — Hyperbolic geometry (Poincaré embeddings)
+
+The intuition: chess positional structure is hierarchical. Material imbalance dominates,
+then pawn structure, then king safety, then tempo. Hyperbolic space represents
+hierarchies naturally — exponentially more room near the boundary, richer capacity
+for nested concepts than a flat sphere.
+
+A strict staircase is even more critical in hyperbolic space: each level of the
+hierarchy must be introduced without collapsing or dominating the levels already
+learned. The risk is that a dominant concept (e.g. material) fills the entire
+hyperbolic disk, leaving no room for subtler structure to develop.
+
+**This is a future phase.** Current work exhausts L2 first. The transition to
+Poincaré embeddings is only warranted once L2 geometry has been pushed to its
+ceiling and the ceiling is measured.
+
+---
+
 ## Long-Term Phases
 
 | Phase | Goal |
