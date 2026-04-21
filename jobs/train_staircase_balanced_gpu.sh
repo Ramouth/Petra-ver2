@@ -51,5 +51,5 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --weight-decay 5e-4 \
     --rank-reg     0.05 \
     --epochs       20 \
-    --patience     5 \
+    --geo-patience 3 \
     --num-workers  4

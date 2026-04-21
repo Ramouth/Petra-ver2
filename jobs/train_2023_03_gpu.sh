@@ -19,7 +19,7 @@ module load cuda/12.1
 #   - 2000+ ELO filter (vs 2500) — broader value distribution, more decisive
 #     games, better endgame calibration
 #   - draw label 0.0 (was -0.1 in feb_sf game-outcome data)
-#   - epochs=50: let patience=5 control stopping, not a hard ceiling
+#   - epochs=50: let geo-patience=3 control stopping, not a hard ceiling
 #   - anchor-dataset=dataset_feb_sf.pt (15%): prevents forgetting draw concept
 #     (KR vs KR drifted to -0.581 without anchor — real games lack drawn endgames)
 #   - lr=5e-4 (was 1e-3): fine-tuning LR; gradient norms grew 0.95→1.90 without it

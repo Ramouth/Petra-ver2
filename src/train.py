@@ -11,8 +11,9 @@ Validation
 Runs after every epoch on the held-out val set (split at game level in data.py).
 Reports: total loss, value MSE, value R², policy top-1 accuracy, policy top-5 accuracy.
 
-Early stopping on val total loss (patience=5 epochs).
-Best checkpoint saved separately from latest.
+Early stopping on geometry patience: stops when effective rank and win·draw cosine
+both stop improving for --geo-patience consecutive epochs (default 3).
+Best checkpoint saved when geometry improves, not on val loss.
 
 Usage
 -----
@@ -39,6 +40,59 @@ from config import device
 from topology_monitor import (topological_health_check,
                                should_abort_early,
                                format_topology_line)
+
+
+# ---------------------------------------------------------------------------
+# Inline geometry metrics — called every epoch
+# ---------------------------------------------------------------------------
+
+def _compute_geometry_metrics(model: "PetraNet", val_loader, n: int = 300) -> dict:
+    """
+    Compute effective rank and strict win·draw centroid cosine from val geometry.
+
+    Fast enough to call every epoch: extracts n geometry vectors, runs one
+    SVD of the 128×128 covariance matrix.
+
+    Returns:
+        eff_rank     (float)       — (Σλ)²/Σλ² on mean-centred covariance
+        win_draw_cos (float|None)  — cosine of win/draw centroids using strict
+                                     thresholds (win >0.7, draw <0.3); None if
+                                     fewer than 10 samples in either bucket
+    """
+    model.eval()
+    vecs, vals = [], []
+    count = 0
+    with torch.no_grad():
+        for batch in val_loader:
+            if count >= n:
+                break
+            tensors = batch[0].float().to(device)
+            take    = min(len(tensors), n - count)
+            g = model.geometry(tensors[:take])
+            vecs.append(g.cpu().numpy())
+            vals.append(batch[1][:take].cpu().numpy())
+            count += take
+
+    vecs = np.concatenate(vecs, axis=0)
+    vals = np.concatenate(vals, axis=0)
+
+    # Effective rank on mean-centred covariance
+    centred  = vecs - vecs.mean(axis=0)
+    cov      = np.cov(centred.T)
+    eigvals  = np.sort(np.linalg.eigvalsh(cov))[::-1]
+    eff_rank = float((eigvals.sum() ** 2) / ((eigvals ** 2).sum() + 1e-8))
+
+    # Strict win·draw centroid cosine (win >0.7, draw <0.3 STM-relative)
+    win_mask  = vals >  0.7
+    draw_mask = np.abs(vals) < 0.3
+    win_draw_cos = None
+    if win_mask.sum() >= 10 and draw_mask.sum() >= 10:
+        c_win  = vecs[win_mask].mean(axis=0)
+        c_draw = vecs[draw_mask].mean(axis=0)
+        denom  = (np.linalg.norm(c_win) + 1e-8) * (np.linalg.norm(c_draw) + 1e-8)
+        win_draw_cos = float(np.dot(c_win, c_draw) / denom)
+
+    return {"eff_rank": eff_rank, "win_draw_cos": win_draw_cos}
 
 
 # ---------------------------------------------------------------------------
@@ -369,9 +423,7 @@ def train(dataset_path: str = None,
           batch_size: int = 512,
           lr: float = 1e-3,
           weight_decay: float = 1e-4,
-          patience: int = 5,
-          tight_patience: int = 3,
-          transition_drop: float = 0.5,
+          geo_patience: int = 3,
           seed: int = 42,
           init_model: str = None,
           resume: str = None,
@@ -480,14 +532,13 @@ def train(dataset_path: str = None,
         # With early_stop patience=5, allows up to 2 LR reductions before stopping
     )
 
-    best_val_loss     = float("inf")
-    prev_val_loss     = float("inf")
-    epochs_no_improve = 0
-    current_patience  = patience
-    phase_transition  = False
-    topo_trajectory   = []
-    topo_check_every  = 2  # check every 2 epochs — lightweight enough
-    start_epoch       = 1
+    best_val_loss  = float("inf")   # logged only; not used for stopping
+    best_rank      = 0.0
+    best_cos       = float("inf")   # lower is better; inf = no measurement yet
+    geo_no_improve = 0
+    topo_trajectory  = []
+    topo_check_every = 2
+    start_epoch      = 1
 
     # Resume from full training-state checkpoint (model + optimizer + scheduler)
     if resume:
@@ -495,15 +546,19 @@ def train(dataset_path: str = None,
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
-        start_epoch       = ckpt["epoch"] + 1
-        best_val_loss     = ckpt["best_val_loss"]
-        epochs_no_improve = ckpt.get("epochs_no_improve", 0)
-        print(f"Resumed from {resume}  (epoch {ckpt['epoch']}, best_val={best_val_loss:.4f})")
+        start_epoch    = ckpt["epoch"] + 1
+        best_val_loss  = ckpt.get("best_val_loss", float("inf"))
+        best_rank      = ckpt.get("best_rank",      0.0)
+        best_cos       = ckpt.get("best_cos",       float("inf"))
+        geo_no_improve = ckpt.get("geo_no_improve", 0)
+        print(f"Resumed from {resume}  (epoch {ckpt['epoch']}, "
+              f"best_rank={best_rank:.1f}, best_wdcos={best_cos:.4f})")
 
     if rank_reg > 0:
         print(f"Rank regularisation: λ={rank_reg}  "
               f"(tr(C²) penalty — maximises effective rank)")
-    print(f"Patience: {patience} (tight={tight_patience} after >{transition_drop*100:.0f}% val drop)\n")
+    print(f"Geometry patience: {geo_patience} epochs  "
+          f"(stops when rank and win·draw cosine both plateau)\n")
     rank_col = f"  {'RankL':>6}" if rank_reg > 0 else ""
     print(f"{'Epoch':>5}  {'T-loss':>7}  {'V-loss':>7}  {'V-MSE':>6}  "
           f"{'V-R²':>6}  {'Top1':>5}  {'Top5':>5}  {'LR':>8}  {'GNorm':>6}"
@@ -530,16 +585,8 @@ def train(dataset_path: str = None,
         lr_now  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
 
-        # Phase transition detection: val loss drops >transition_drop in one epoch
-        if not phase_transition and prev_val_loss < float("inf"):
-            drop = (prev_val_loss - val_m["loss"]) / (prev_val_loss + 1e-8)
-            if drop > transition_drop:
-                phase_transition = True
-                current_patience = tight_patience
-                print(f"         *** Phase transition ({drop*100:.0f}% drop) "
-                      f"— tight patience={tight_patience} ***")
-
-        prev_val_loss = val_m["loss"]
+        if val_m["loss"] < best_val_loss:
+            best_val_loss = val_m["loss"]
 
         rank_str = f"  {val_m['rank_loss']:>6.4f}" if rank_reg > 0 else ""
         print(f"{epoch:>5}  "
@@ -554,7 +601,29 @@ def train(dataset_path: str = None,
               + rank_str +
               f"  ({elapsed:.0f}s)")
 
-        # Topological health check every 2 epochs (epochs 1, 3, 5, ...)
+        # --- Geometry patience (primary stopping criterion) ---
+        geo = _compute_geometry_metrics(model, val_loader)
+        rank = geo["eff_rank"]
+        cos  = geo["win_draw_cos"]
+        cos_str = f"{cos:.4f}" if cos is not None else "   n/a"
+
+        rank_improved = rank > best_rank + 0.1
+        cos_improved  = (cos is not None) and (cos < best_cos - 0.005)
+
+        if rank_improved or cos_improved:
+            geo_no_improve = 0
+            if rank_improved:
+                best_rank = rank
+            if cos_improved:
+                best_cos = cos
+            torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
+            print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ new best")
+        else:
+            geo_no_improve += 1
+            print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}"
+                  f"  [{geo_no_improve}/{geo_patience}]")
+
+        # --- Topological health check every 2 epochs (background crash guard) ---
         if epoch % topo_check_every == 1:
             topo = topological_health_check(model, val_loader, epoch,
                                             device=device)
@@ -571,26 +640,22 @@ def train(dataset_path: str = None,
 
         # Full training-state checkpoint — enables true resume on HPC preemption
         torch.save({
-            "epoch":            epoch,
-            "model":            model.state_dict(),
-            "optimizer":        optimizer.state_dict(),
-            "scheduler":        scheduler.state_dict(),
-            "best_val_loss":    best_val_loss,
-            "epochs_no_improve": epochs_no_improve,
+            "epoch":          epoch,
+            "model":          model.state_dict(),
+            "optimizer":      optimizer.state_dict(),
+            "scheduler":      scheduler.state_dict(),
+            "best_val_loss":  best_val_loss,
+            "best_rank":      best_rank,
+            "best_cos":       best_cos,
+            "geo_no_improve": geo_no_improve,
         }, os.path.join(out_dir, "resume.pt"))
 
-        if val_m["loss"] < best_val_loss:
-            best_val_loss     = val_m["loss"]
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
-            print(f"         ↳ new best val loss: {best_val_loss:.4f}")
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= current_patience:
-                print(f"\nEarly stopping: no improvement for {current_patience} epochs.")
-                break
+        if geo_no_improve >= geo_patience:
+            print(f"\nGeometry patience exhausted ({geo_patience} epochs without improvement).")
+            break
 
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+    best_cos_str = f"{best_cos:.4f}" if best_cos < float("inf") else "n/a"
+    print(f"\nTraining complete. Best rank: {best_rank:.1f}  best wdcos: {best_cos_str}")
     print(f"Best model → {os.path.join(out_dir, 'best.pt')}")
 
     # Final sanity check on value range
@@ -666,11 +731,9 @@ def main():
     ap.add_argument("--extra-dataset", default=None,
                     help="Second dataset to merge into train+val before training. "
                          "Use for combining different Lichess months.")
-    ap.add_argument("--patience",    type=int,   default=5)
-    ap.add_argument("--tight-patience", type=int, default=3,
-                    help="Patience after phase transition detected (default: 3)")
-    ap.add_argument("--transition-drop", type=float, default=0.5,
-                    help="Val loss fraction drop that signals a phase transition (default: 0.5)")
+    ap.add_argument("--geo-patience", type=int, default=3,
+                    help="Stop after this many epochs with no improvement in "
+                         "effective rank or win·draw cosine (default: 3)")
     ap.add_argument("--seed",        type=int,   default=42)
     ap.add_argument("--init-model",  default=None,
                     help="Load these weights before training (zigzag fine-tuning)")
@@ -713,9 +776,7 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
         extra_dataset=args.extra_dataset,
-        patience=args.patience,
-        tight_patience=args.tight_patience,
-        transition_drop=args.transition_drop,
+        geo_patience=args.geo_patience,
         seed=args.seed,
         init_model=args.init_model,
         anchor_dataset=args.anchor_dataset,
