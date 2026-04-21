@@ -9,17 +9,19 @@ ResBlocks:   64 channels × N_BLOCKS (default 4), each with skip connection
 Flatten:     64 × 8 × 8 = 4096
 Bottleneck:  Linear(4096 → 128) + L2Norm  ← geometry space (unit hypersphere)
 
-Value head:  Linear(128 → 1) + Tanh  (thin — geometry carries the representation)
-Policy head: Linear(128 → 4096)  [logits over STM-relative 64×64 from/to pairs]
-
-The bottleneck projects onto the unit hypersphere via L2 normalisation.
-Cosine similarity is therefore the natural metric — consistent with how
-probe_geometry.py and test_geometry.py measure the space.
-
-No saturation (unlike Tanh), gradients flow freely to the ResBlocks.
-The geometry space is not engineered — it emerges from training.
+Value head:    Linear(128 → 1) + Tanh    (thin — geometry carries the representation)
+Drawness head: Linear(128 → 1) + Sigmoid (auxiliary — P(position is a structural draw))
+Policy head:   Linear(128 → 4096)        [logits over STM-relative 64×64 from/to pairs]
 
 Value convention: +1 = current side to move wins.
+Drawness: probability that the position is a *structural* draw (neither side can make
+  progress under optimal play — e.g. KR vs KR, fortress, insufficient material).
+  Distinct from value ≈ 0, which only means "balanced". A sharp equal middlegame has
+  value ≈ 0 and drawness ≈ 0. KR vs KR has value ≈ 0 and drawness ≈ 1.
+
+The bottleneck projects onto the unit hypersphere via L2 normalisation.
+Cosine similarity is the natural metric — consistent with probe_geometry.py.
+
 Policy: logits in STM-relative coordinates, masked to legal moves before softmax.
         Always pass flip=(board.turn == chess.BLACK) to move_to_index.
 """
@@ -91,6 +93,15 @@ class PetraNet(nn.Module):
             nn.Tanh(),                 # thin head — geometry carries the representation
         )
 
+        # Auxiliary drawness head — trained with BCE on structural draw sources.
+        # Structurally drawn positions (KR vs KR, KNN vs K, etc.) → target 1.0
+        # Decisive positions → target 0.0
+        # Balanced middlegames → not supervised (ambiguous, skip in loss)
+        self.drawness_head = nn.Sequential(
+            nn.Linear(bottleneck_dim, 1),
+            nn.Sigmoid(),
+        )
+
         self.policy_head = nn.Linear(bottleneck_dim, 64 * 64)
 
     def forward(self, x: torch.Tensor):
@@ -106,8 +117,8 @@ class PetraNet(nn.Module):
     def _geometry_fwd(self, x: torch.Tensor) -> torch.Tensor:
         """
         Geometry forward pass with gradients intact.
-        Used by training losses (e.g. concept anchoring) that need to backprop
-        through the bottleneck. Not for external use — call geometry() for probing.
+        Used by training losses that need to backprop through the bottleneck.
+        Not for external use — call geometry() for probing.
         """
         x = self.input_block(x)
         x = self.res_blocks(x)
@@ -121,6 +132,26 @@ class PetraNet(nn.Module):
         """
         with torch.no_grad():
             return self._geometry_fwd(x)
+
+    def drawness_fwd(self, g: torch.Tensor) -> torch.Tensor:
+        """
+        Drawness score from geometry vector, gradient-enabled. For training.
+        g: (B, 128) geometry vectors (output of _geometry_fwd)
+        Returns: (B,) scores in [0, 1]
+        """
+        return self.drawness_head(g).squeeze(-1)
+
+    @torch.no_grad()
+    def drawness(self, board: chess.Board, device: torch.device) -> float:
+        """
+        Return the structural drawness score [0, 1] for a single board.
+        1.0 = confident structural draw (KR vs KR, fortress, etc.)
+        0.0 = confident non-draw (decisive position)
+        """
+        self.eval()
+        t = board_to_tensor(board).unsqueeze(0).to(device)
+        g = self._geometry_fwd(t)
+        return self.drawness_fwd(g).item()
 
     @torch.no_grad()
     def policy(self, board: chess.Board, device: torch.device) -> dict:

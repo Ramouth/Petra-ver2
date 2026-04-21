@@ -247,6 +247,14 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
             anchor_masks = torch.full((n_sample, 512), 255, dtype=torch.uint8)
         mixed["legal_masks"] = torch.cat([primary_masks, anchor_masks])
 
+    # Track which positions came from the structural draw anchor pool.
+    # Used by the drawness head loss: anchor positions with value ≈ 0 are
+    # structural draws (positives); decisive positions anywhere are negatives.
+    mixed["is_anchor"] = torch.cat([
+        torch.zeros(n_primary, dtype=torch.bool),
+        torch.ones(n_sample,  dtype=torch.bool),
+    ])
+
     print(f"  anchor positions sampled: {n_sample:,} / {n_anchor:,}")
     print(f"  mixed train size: {len(mixed['tensors']):,}  "
           f"(was {n_primary:,}, +{n_sample:,} anchor)")
@@ -278,10 +286,10 @@ class _IndexedSplitDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = False,
-              policy_weight: float = 1.0, rank_reg: float = 0.0,
+              policy_weight: float = 1.0, rank_reg: float = 0.0, draw_reg: float = 0.0,
               has_stored_vd: bool = True):
     model.train(is_train)
-    total_loss = total_vloss = total_ploss = total_rloss = 0.0
+    total_loss = total_vloss = total_ploss = total_rloss = total_dloss = 0.0
     total_grad_norm = 0.0
     n_batches = 0
     all_value_preds, all_value_targets = [], []
@@ -290,25 +298,23 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for batch in loader:
-            # Batch layout (see _make_loader for construction):
-            #   has_stored_vd=True,  legal_masks: (tensors, values, move_idxs, visit_dists, packed_masks)
-            #   has_stored_vd=True,  no masks:    (tensors, values, move_idxs, visit_dists)
-            #   has_stored_vd=False, legal_masks: (tensors, values, move_idxs, packed_masks)
-            #   has_stored_vd=False, no masks:    (tensors, values, move_idxs)
-            # legal_masks are kept packed (N, 512) uint8 and unpacked here per batch
-            # to avoid a (N, 4096) bool tensor at load time (~1.5 GiB for 380k positions).
+            # Batch layout — is_anchor is always the last element:
+            #   dense+vd, no masks:  (tensors, values, move_idxs, visit_dists, is_anchor)              5
+            #   dense+vd, masks:     (tensors, values, move_idxs, visit_dists, packed_masks, is_anchor) 6
+            #   dense+no-vd, no masks: (tensors, values, move_idxs, is_anchor)                         4
+            #   dense+no-vd, masks:    (tensors, values, move_idxs, packed_masks, is_anchor)            5
             if dense_policy and has_stored_vd:
-                if len(batch) == 5:
-                    tensors, values, move_idxs, visit_dists, packed_masks = batch
-                else:
-                    tensors, values, move_idxs, visit_dists = batch
+                if len(batch) == 6:
+                    tensors, values, move_idxs, visit_dists, packed_masks, is_anchor = batch
+                else:  # 5
+                    tensors, values, move_idxs, visit_dists, is_anchor = batch
                     packed_masks = None
                 visit_dists = visit_dists.to(device)
             else:
-                if len(batch) == 4:
-                    tensors, values, move_idxs, packed_masks = batch
-                else:
-                    tensors, values, move_idxs = batch
+                if len(batch) == 5:
+                    tensors, values, move_idxs, packed_masks, is_anchor = batch
+                else:  # 4
+                    tensors, values, move_idxs, is_anchor = batch
                     packed_masks = None
 
             # Unpack legal masks per batch
@@ -331,11 +337,11 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             if dense_policy and not has_stored_vd:
                 visit_dists = F.one_hot(move_idxs, 4096).float()
 
-            # When rank_reg is active, route through _geometry_fwd so we
-            # get the geometry tensor without a second forward pass.
-            if rank_reg > 0:
-                g          = model._geometry_fwd(tensors)
-                value_pred = model.value_head(g)
+            # Route through _geometry_fwd when any geometry-based loss is active,
+            # so we get the bottleneck tensor without a second forward pass.
+            if rank_reg > 0 or draw_reg > 0:
+                g             = model._geometry_fwd(tensors)
+                value_pred    = model.value_head(g)
                 policy_logits = model.policy_head(g)
             else:
                 value_pred, policy_logits = model(tensors)
@@ -377,6 +383,25 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             else:
                 rloss = torch.zeros(1, device=device)
 
+            # Drawness loss — BCE on structural draw positions.
+            # Positives: anchor positions with value ≈ 0.0 (endgame pool draws)
+            # Negatives: decisive positions (|v| > 0.5) from anywhere
+            # Balanced middlegames (|v| ≤ 0.5, non-anchor) are skipped — ambiguous.
+            if draw_reg > 0 and g is not None:
+                is_anchor_dev = is_anchor.to(device)
+                d_pred    = model.drawness_fwd(g)
+                draw_pos  = is_anchor_dev & (values.abs() < 0.1)
+                draw_neg  = values.abs() > 0.5
+                draw_mask = draw_pos | draw_neg
+                if draw_mask.sum() >= 4:
+                    draw_targets = draw_pos[draw_mask].float()
+                    dloss = F.binary_cross_entropy(d_pred[draw_mask], draw_targets)
+                    loss  = loss + draw_reg * dloss
+                else:
+                    dloss = torch.zeros(1, device=device)
+            else:
+                dloss = torch.zeros(1, device=device)
+
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -388,6 +413,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             total_vloss += vloss.item()
             total_ploss += ploss.item()
             total_rloss += rloss.item()
+            total_dloss += dloss.item()
             n_batches   += 1
 
             # Accumulate for R² and accuracy
@@ -410,6 +436,7 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
         "value_loss": total_vloss / n_batches,
         "policy_loss":total_ploss / n_batches,
         "rank_loss":  total_rloss / n_batches,
+        "draw_loss":  total_dloss / n_batches,
         "value_r2":   r2,
         "top1":       policy_correct_top1 / policy_total,
         "top5":       policy_correct_top5 / policy_total,
@@ -435,7 +462,8 @@ def train(dataset_path: str = None,
           endgame_stages=None,
           num_workers: int = 0,
           deterministic: bool = False,
-          rank_reg: float = 0.0):
+          rank_reg: float = 0.0,
+          draw_reg: float = 0.0):
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -499,11 +527,19 @@ def train(dataset_path: str = None,
             else:
                 visit_dists = None
 
+            # is_anchor: True for positions from the structural draw anchor pool.
+            # Always appended last so batch format is unambiguous.
+            if "is_anchor" in d:
+                is_anchor = d["is_anchor"][idxs]
+            else:
+                is_anchor = torch.zeros(len(idxs), dtype=torch.bool)
+
             out = [tensors, values, move_idxs]
             if visit_dists is not None:
                 out.append(visit_dists)
             if packed_masks is not None:
                 out.append(packed_masks)
+            out.append(is_anchor)
             return tuple(out)
 
         ds = _IndexedSplitDataset(d)
@@ -520,7 +556,12 @@ def train(dataset_path: str = None,
 
     model = PetraNet().to(device)
     if init_model:
-        model.load_state_dict(torch.load(init_model, map_location=device, weights_only=True))
+        sd = torch.load(init_model, map_location=device, weights_only=True)
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if missing:
+            print(f"  New parameters (randomly initialized): {missing}")
+        if unexpected:
+            print(f"  Unexpected keys ignored: {unexpected}")
         print(f"Loaded starting weights from {init_model}")
     n_params = sum(p.numel() for p in model.parameters())
     print(f"PetraNet: {n_params:,} parameters  |  device: {device}")
@@ -557,13 +598,20 @@ def train(dataset_path: str = None,
     if rank_reg > 0:
         print(f"Rank regularisation: λ={rank_reg}  "
               f"(tr(C²) penalty — maximises effective rank)")
+    if draw_reg > 0:
+        if not anchor_dataset:
+            print(f"WARNING: --draw-reg set but no --anchor-dataset. "
+                  f"No structural draw positives — drawness loss will only train on negatives.")
+        print(f"Drawness regularisation: λ={draw_reg}  "
+              f"(BCE — structural draws from anchor pool vs decisive positions)")
     print(f"Geometry patience: {geo_patience} epochs  "
           f"(stops when rank and win·draw cosine both plateau)\n")
     rank_col = f"  {'RankL':>6}" if rank_reg > 0 else ""
+    draw_col = f"  {'DrawL':>6}" if draw_reg > 0 else ""
     print(f"{'Epoch':>5}  {'T-loss':>7}  {'V-loss':>7}  {'V-MSE':>6}  "
           f"{'V-R²':>6}  {'Top1':>5}  {'Top5':>5}  {'LR':>8}  {'GNorm':>6}"
-          + rank_col)
-    print("-" * (73 + (9 if rank_reg > 0 else 0)))
+          + rank_col + draw_col)
+    print("-" * (73 + (9 if rank_reg > 0 else 0) + (9 if draw_reg > 0 else 0)))
 
     for epoch in range(start_epoch, epochs + 1):
         t0 = time.time()
@@ -576,10 +624,12 @@ def train(dataset_path: str = None,
 
         train_m = run_epoch(model, train_loader, optimizer, is_train=True,
                             dense_policy=dense_policy, policy_weight=policy_weight,
-                            rank_reg=rank_reg, has_stored_vd=has_stored_vd)
+                            rank_reg=rank_reg, draw_reg=draw_reg,
+                            has_stored_vd=has_stored_vd)
         val_m   = run_epoch(model, val_loader,   optimizer, is_train=False,
                             dense_policy=dense_policy, policy_weight=policy_weight,
-                            rank_reg=rank_reg, has_stored_vd=has_stored_vd)
+                            rank_reg=rank_reg, draw_reg=draw_reg,
+                            has_stored_vd=has_stored_vd)
 
         scheduler.step(val_m["loss"])
         lr_now  = optimizer.param_groups[0]["lr"]
@@ -589,6 +639,7 @@ def train(dataset_path: str = None,
             best_val_loss = val_m["loss"]
 
         rank_str = f"  {val_m['rank_loss']:>6.4f}" if rank_reg > 0 else ""
+        draw_str = f"  {val_m['draw_loss']:>6.4f}" if draw_reg > 0 else ""
         print(f"{epoch:>5}  "
               f"{train_m['loss']:>7.4f}  "
               f"{val_m['loss']:>7.4f}  "
@@ -598,7 +649,7 @@ def train(dataset_path: str = None,
               f"{val_m['top5']:>5.3f}  "
               f"{lr_now:>8.2e}  "
               f"{train_m['grad_norm']:>6.3f}"
-              + rank_str +
+              + rank_str + draw_str +
               f"  ({elapsed:.0f}s)")
 
         # --- Geometry patience (primary stopping criterion) ---
@@ -713,6 +764,27 @@ def _sanity_check(model: PetraNet):
     else:
         print("  WARNING: some sign checks failed — review training data.")
 
+    # Drawness sanity: structural draw should score high, balanced middlegame low.
+    # Gate: KR vs KR > 0.7, sharp balanced < 0.3.
+    # Only meaningful after draw_reg training — newly initialised head will be random.
+    print("\n  Drawness head:")
+    drawness_tests = [
+        ("KR vs KR (structural draw)",
+         chess.Board("8/3k4/8/r7/8/8/3K4/7R w - - 0 1"),
+         ">0.7"),
+        ("Sicilian 1.d4 c5 (balanced, sharp)",
+         chess.Board("rnbqkbnr/pp1ppppp/8/2p5/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2"),
+         "<0.3"),
+    ]
+    for name, board, gate in drawness_tests:
+        d_val = model.drawness(board, device)
+        if gate == ">0.7":
+            ok = d_val > 0.7
+        else:
+            ok = d_val < 0.3
+        mark = "✓" if ok else "~"  # ~ = not yet trained, not a hard failure
+        print(f"    {mark} {name:45s}  drawness={d_val:.3f}  (gate: {gate})")
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -763,6 +835,13 @@ def main():
                          "concentration and push effective rank higher. "
                          "Try 0.05–0.2. tr(C²) ≈ 1/eff_rank so at rank=7 "
                          "the penalty adds ~λ·0.14.")
+    ap.add_argument("--draw-reg", type=float, default=0.0,
+                    help="Drawness regularisation weight λ (default: 0). "
+                         "Trains the auxiliary drawness head with BCE loss. "
+                         "Requires --anchor-dataset: anchor positions with |v|<0.1 "
+                         "are structural draw positives; |v|>0.5 positions are negatives. "
+                         "Try 0.01–0.05. Balanced middlegames (|v|≤0.5, non-anchor) are "
+                         "skipped — they are ambiguous, not draws.")
     args = ap.parse_args()
 
     if args.dataset is None and args.endgame_positions == 0:
@@ -788,6 +867,7 @@ def main():
         resume=args.resume,
         deterministic=args.deterministic,
         rank_reg=args.rank_reg,
+        draw_reg=args.draw_reg,
     )
 
 
