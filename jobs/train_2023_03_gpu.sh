@@ -20,6 +20,9 @@ module load cuda/12.1
 #     games, better endgame calibration
 #   - draw label 0.0 (was -0.1 in feb_sf game-outcome data)
 #   - epochs=50: let patience=5 control stopping, not a hard ceiling
+#   - anchor-dataset=dataset_feb_sf.pt (15%): prevents forgetting draw concept
+#     (KR vs KR drifted to -0.581 without anchor — real games lack drawn endgames)
+#   - lr=5e-4 (was 1e-3): fine-tuning LR; gradient norms grew 0.95→1.90 without it
 #
 # Geometry gate (run probe_geometry_2023_03.sh after training):
 #   - Effective rank > 20 (target: >30)
@@ -29,10 +32,13 @@ module load cuda/12.1
 BLACKHOLE="/dtu/blackhole/0b/206091"
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
-    --dataset      ${BLACKHOLE}/dataset_2023_03_sf18.pt \
-    --init-model   /zhome/81/b/206091/Petra-ver2/models/feb_sf/best.pt \
-    --rank-reg     0.1 \
-    --num-workers  0 \
-    --weight-decay 5e-4 \
-    --epochs       50 \
-    --out          /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03
+    --dataset        ${BLACKHOLE}/dataset_2023_03_sf18.pt \
+    --init-model     /zhome/81/b/206091/Petra-ver2/models/feb_sf/best.pt \
+    --anchor-dataset /zhome/81/b/206091/Petra-ver2/data/dataset_feb_sf.pt \
+    --anchor-frac    0.15 \
+    --rank-reg       0.1 \
+    --num-workers    0 \
+    --weight-decay   5e-4 \
+    --lr             5e-4 \
+    --epochs         50 \
+    --out            /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03
