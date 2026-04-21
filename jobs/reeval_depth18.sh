@@ -2,7 +2,7 @@
 #BSUB -J reeval_depth18
 #BSUB -q hpc
 #BSUB -n 16
-#BSUB -R "rusage[mem=4GB]"
+#BSUB -R "rusage[mem=4GB] select[hname!='n-62-21-89']"
 #BSUB -W 12:00
 #BSUB -o /zhome/81/b/206091/logs/reeval_depth18_%J.out
 #BSUB -e /zhome/81/b/206091/logs/reeval_depth18_%J.err
