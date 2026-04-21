@@ -95,6 +95,28 @@ def _compute_geometry_metrics(model: "PetraNet", val_loader, n: int = 300) -> di
     return {"eff_rank": eff_rank, "win_draw_cos": win_draw_cos}
 
 
+def _compute_drawness_sanity(model: "PetraNet") -> dict:
+    """
+    Probe whether the auxiliary drawness head separates structural draws from
+    sharp balanced positions. Used only when --draw-reg is active.
+    """
+    import chess
+
+    model.eval()
+    krkr = chess.Board("8/3k4/8/r7/8/8/3K4/7R w - - 0 1")
+    sharp_equal = chess.Board(
+        "rnbqkbnr/pp1ppppp/8/2p5/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2"
+    )
+    with torch.no_grad():
+        d_structural = model.drawness(krkr, device)
+        d_balanced = model.drawness(sharp_equal, device)
+    return {
+        "structural": d_structural,
+        "balanced": d_balanced,
+        "gap": d_structural - d_balanced,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Dataset loader
 # ---------------------------------------------------------------------------
@@ -576,6 +598,7 @@ def train(dataset_path: str = None,
     best_val_loss  = float("inf")   # logged only; not used for stopping
     best_rank      = 0.0
     best_cos       = float("inf")   # lower is better; inf = no measurement yet
+    best_draw_gap  = float("-inf")
     geo_no_improve = 0
     topo_trajectory  = []
     topo_check_every = 2
@@ -591,6 +614,7 @@ def train(dataset_path: str = None,
         best_val_loss  = ckpt.get("best_val_loss", float("inf"))
         best_rank      = ckpt.get("best_rank",      0.0)
         best_cos       = ckpt.get("best_cos",       float("inf"))
+        best_draw_gap  = ckpt.get("best_draw_gap",  float("-inf"))
         geo_no_improve = ckpt.get("geo_no_improve", 0)
         print(f"Resumed from {resume}  (epoch {ckpt['epoch']}, "
               f"best_rank={best_rank:.1f}, best_wdcos={best_cos:.4f})")
@@ -660,19 +684,30 @@ def train(dataset_path: str = None,
 
         rank_improved = rank > best_rank + 0.1
         cos_improved  = (cos is not None) and (cos < best_cos - 0.005)
+        draw_improved = False
+        draw = None
+        if draw_reg > 0:
+            draw = _compute_drawness_sanity(model)
+            draw_improved = draw["gap"] > best_draw_gap + 0.02
 
-        if rank_improved or cos_improved:
+        if rank_improved or cos_improved or draw_improved:
             geo_no_improve = 0
             if rank_improved:
                 best_rank = rank
             if cos_improved:
                 best_cos = cos
+            if draw_improved:
+                best_draw_gap = draw["gap"]
             torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
             print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ new best")
         else:
             geo_no_improve += 1
             print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}"
                   f"  [{geo_no_improve}/{geo_patience}]")
+        if draw_reg > 0:
+            print(f"  Drawness: structural={draw['structural']:.3f}  "
+                  f"balanced={draw['balanced']:.3f}  gap={draw['gap']:+.3f}  "
+                  f"best_gap={best_draw_gap:+.3f}")
 
         # --- Topological health check every 2 epochs (background crash guard) ---
         if epoch % topo_check_every == 1:
@@ -698,6 +733,7 @@ def train(dataset_path: str = None,
             "best_val_loss":  best_val_loss,
             "best_rank":      best_rank,
             "best_cos":       best_cos,
+            "best_draw_gap":  best_draw_gap,
             "geo_no_improve": geo_no_improve,
         }, os.path.join(out_dir, "resume.pt"))
 
@@ -706,7 +742,10 @@ def train(dataset_path: str = None,
             break
 
     best_cos_str = f"{best_cos:.4f}" if best_cos < float("inf") else "n/a"
-    print(f"\nTraining complete. Best rank: {best_rank:.1f}  best wdcos: {best_cos_str}")
+    draw_gap_str = (f"  best draw_gap: {best_draw_gap:+.3f}"
+                    if draw_reg > 0 and best_draw_gap > float("-inf") else "")
+    print(f"\nTraining complete. Best rank: {best_rank:.1f}  "
+          f"best wdcos: {best_cos_str}{draw_gap_str}")
     print(f"Best model → {os.path.join(out_dir, 'best.pt')}")
 
     # Final sanity check on value range

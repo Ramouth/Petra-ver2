@@ -19,8 +19,9 @@ module load cuda/12.1
 #
 # Data: balanced_*.pt — positions with |SF_value| < 0.3, depth-20 labels,
 #       high-ELO games (2200+).  These are genuinely contested equal positions
-#       where the primary signal is that the position is NOT decided — the draw
-#       dimension must activate.
+#       where the primary value signal is that the position is NOT decided.
+# Anchor: endgame_sf15.pt — structural draws are mixed in so drawness is trained
+#       from true draw sources rather than from the balanced bucket itself.
 #
 # Init: staircase_decisive/best.pt — chain from Stage A.
 #       The win/loss axis is already positioned; Stage B specialises the draw
@@ -39,17 +40,23 @@ module load cuda/12.1
 #   - strict win·loss cosine remains negative (draw movement should not collapse)
 #   - Effective rank > 25 (or ideally > 30)
 #   - KR vs KR value head output ≈ 0 (draw dimension open → value near neutral)
+#   - drawness: KR vs KR > 0.7, sharp balanced middlegame < 0.3
 #
 # After this job: run probe_geometry.sh to verify, then consider self-play harvest.
 
 # ── Data paths — edit to match your split output ───────────────────────────────
+BLACKHOLE="/dtu/blackhole/0b/206091"
+
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --dataset      /zhome/81/b/206091/Petra-ver2/data/balanced_2020_03.pt \
+    --anchor-dataset ${BLACKHOLE}/endgame_sf15.pt \
+    --anchor-frac  0.15 \
     --init-model   /zhome/81/b/206091/Petra-ver2/models/staircase_decisive/best.pt \
     --out          /zhome/81/b/206091/Petra-ver2/models/staircase_balanced \
     --lr           5e-5 \
     --weight-decay 5e-4 \
     --rank-reg     0.05 \
+    --draw-reg     0.02 \
     --epochs       20 \
     --geo-patience 3 \
     --num-workers  4

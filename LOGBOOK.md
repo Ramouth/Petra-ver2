@@ -224,3 +224,106 @@ return 0.0
 
 ### Why the extra training run
 `sf_gpu/best.pt` has effective rank 3.7/128 — almost pure win/loss axis, no draw concept, opening positions OOD (trained on max_pieces=20 only). `dataset_balanced.pt` adds full-board positions and balanced labels to fill the geometry gap before self-play.
+
+---
+
+## Session 11 — Endgame Supplement Results + Decisiveness Zigzag Design (2026-04-21)
+
+### lichess_2023_03_endgame — training results
+
+Model trained on 800k Lichess 2023-03 positions (SF depth-18) + 200k endgame anchor
+(`endgame_sf15.pt`, anchor-frac=0.25). Init from `feb_sf/best.pt`. Geometry patience=3.
+
+**Geometry probe (Job probe_geo_2023_03_endgame, dataset_2023_03_sf18.pt, n=5000):**
+
+| Metric | lichess_2023_03_endgame | feb_sf baseline |
+|--------|------------------------|-----------------|
+| Effective rank | **21.6 / 128** | 18.9 / 128 |
+| Win·draw cosine (strict) | 0.3404 | 0.1676 |
+| KR vs KR \|value\| | **+0.184** ✓ | failed |
+
+**First-ever KR vs KR pass.** Rank improved +2.7 over feb_sf. Win·draw cosine higher
+than baseline — see interpretation note below.
+
+**Win·draw cosine interpretation:** On Lichess val data the "draw" bucket (|v|<0.3)
+contains near-equal middlegames with soft SF labels, not structural draws. After endgame
+training the model has learned a genuine draw concept from KR vs KR / KNN vs K / KB vs KB
+positions — these don't map cleanly onto near-equal middlegames. Cosine=0.3404 is not a
+regression; use cosine as a collapse detector only (panic >0.5). KR vs KR sanity check
+and ELO are the honest gates.
+
+### ELO evaluation — lichess_2023_03_endgame vs feb_sf
+
+200-game head-to-head (n_sim=100, step=5). Result at 100/200 games:
+
+| Games | W | D | L | Win rate |
+|-------|---|---|---|----------|
+| 20 | 6 | 10 | 4 | 0.550 |
+| 40 | 9 | 23 | 8 | 0.512 |
+| 60 | 13 | 33 | 14 | 0.492 |
+| 80 | 17 | 44 | 19 | 0.487 |
+| 100 | 26 | 52 | 22 | **0.520** |
+
+Draw rate 52% — model draws more than feb_sf. When decisive, W=26 L=22 (+4). Trending
+slightly positive. Evaluation still running at time of writing.
+
+**Fork decision:** ELO trending above 50% → Fork 2 live. Endgame supplement works.
+Next step is decisiveness zigzag, not architecture rewrite.
+
+---
+
+### Decisiveness Zigzag — Design
+
+Instead of further refining the endgame data mix, staircase training through
+decisiveness-filtered subsets of the SF-labeled dataset:
+
+| Stage | Lichess filter | Draw anchor | Purpose |
+|-------|---------------|-------------|---------|
+| 1 | `\|v\| > 0.7` | endgame pool (KR vs KR etc.) | Force win/loss axis apart, anchor draw dimension |
+| 2 | `\|v\| > 0.5` | endgame pool + `\|v\| < 0.10` from Lichess | Broaden axis, expand draw region |
+| 3 | All positions | endgame pool | Full rank expansion with gradations |
+
+Gate at each stage: rank must increase before advancing. If rank stalls between stages
+→ step size too large, add intermediate threshold.
+
+**Draw anchor is mandatory even in Stage 1.** Without it, training on decisive-only
+positions builds a 1D win/loss axis with no draw dimension. When Stage 3 introduces
+draws cold into a geometry with no space for them, collapse or regression follows.
+We observed this in Doover 2 Round 1 (endgame curriculum → rank 1.0).
+
+**Draw perpendicularity loss** added to train.py alongside rank-reg:
+
+```
+L_draw = λ_draw · cos²(c_draw, axis_win_loss)
+```
+
+where `axis_win_loss = (c_win - c_loss) / ||c_win - c_loss||`, computed per-batch
+from positions in each bucket. `c_win` and `c_loss` are detached — gradient only
+flows through draw vectors. λ_draw = 0.01 (small nudge, value loss dominates).
+
+Rationale: the scalar value loss treats 0.0 as the midpoint of the win/loss axis.
+Draw vectors have no incentive to move perpendicular to win/loss — they just need to
+be near the origin. The draw perp loss adds an explicit gradient forcing the draw
+centroid off the win/loss axis, opening a genuine second dimension.
+
+---
+
+### Architectural Note — WDL head as alternative
+
+The scalar value head supervises exactly one direction in the 128-dim geometry space.
+Win/draw/loss all collapse onto a single axis: win high, loss low, draw in between.
+No loss term forces draw to occupy a separate geometric direction.
+
+A WDL (win-draw-loss) head predicts `(p_win, p_draw, p_loss)` with cross-entropy loss
+(2 degrees of freedom after normalisation). Backprop then supervises two independent
+directions, making three-way geometric separation a requirement of the loss rather than
+an emergent property.
+
+However: the scalar [-1,1] span gives the geometry a continuous gradient field with
+127 unconstrained dimensions. The WDL simplex constrains two directions and leaves 126.
+The continuous scalar may allow richer organic structure to emerge if the data is
+sufficiently varied. This is an empirical question — WDL is not obviously superior.
+
+**Decision:** run decisiveness zigzag + draw perp loss on the scalar architecture first.
+Measure the rank ceiling. WDL is the architectural comparison once that ceiling is
+known.

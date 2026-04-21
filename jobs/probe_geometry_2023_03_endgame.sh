@@ -19,6 +19,9 @@ module load gcc/13.4.0-binutils-2.44
 #   rank > 18.9
 #   win·draw cosine < 0.1676
 #   KR vs KR sanity: |value| < 0.35
+#   structural drawness:
+#     KR vs KR > 0.7
+#     sharp balanced middlegame < 0.3
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 

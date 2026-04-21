@@ -780,6 +780,128 @@ Probe ideas, roughly ordered by implementation cost:
    material balance, phase, or outcome. Visual sanity check before committing to
    quantitative probes.
 
+### Draw representation — beyond 2D (2026-04-21)
+
+**The core problem:** Draw is not a positional property — it is a dynamical one.
+Win and loss describe the state of the board. Draw describes the *trajectory* of
+the game: under optimal play, the position does not progress toward resolution.
+It cycles. A fortress loops indefinitely. Repetition is a literal periodic orbit.
+KR vs KR has no winning direction — it oscillates.
+
+This means win/draw/loss cannot be cleanly represented as three linear directions
+in a shared geometry space. Win and loss are antipodal on an axis. Draw is not a
+third pole — it is a different kind of object. Placing a draw centroid perpendicular
+to the win/loss axis (the draw perp loss approach) is a linear approximation of
+something that is fundamentally non-linear.
+
+**WDL head analysis:**
+
+A WDL head with SF-derived labels does not solve this. The conversion
+`p_draw = 1 - |v|` defines draw as *the complement of decisiveness* — not as
+a genuine third category. A near-equal sharp middlegame and KR vs KR both get
+`p_draw ≈ 1.0` but are geometrically unrelated. The three-way gradient pressure
+from WDL is only meaningful if the draw label comes from actual game outcomes,
+not scalar SF evaluations. With game-outcome WDL labels the draw signal is noisy
+(blunders, ELO dependence) but structurally correct. With SF-derived WDL the
+signal is clean but the draw concept is fake.
+
+**What draw actually looks like mathematically:**
+
+A draw trajectory in geometry space has small net displacement and oscillatory
+character — the geometry vectors form a closed loop or remain in a bounded region.
+Win trajectories move consistently toward one pole; loss trajectories toward the
+other. The mathematical signature of draw is not a direction but a **winding number**
+— a topological invariant counting how many times a trajectory loops. Win and loss
+trajectories have winding number 0 (they go somewhere and stop). Draw trajectories
+have non-zero winding number (they orbit).
+
+The covariance structure of draw positions may also differ: not one dominant
+eigenvector (a direction) but two or more comparable eigenvalues forming a plane —
+a torus-like submanifold rather than a directed arc. The β1 loops detected in
+persistent homology may literally correspond to draw cycles — probe idea #3
+(sample positions on persistent β1 cycles: do they correspond to repetition,
+fortress, zugzwang?) is the empirical test.
+
+**Consequences for current architecture:**
+
+The current architecture processes individual positions. Draw-ness as a dynamical
+property requires either trajectory input (sequences of positions) or the model to
+implicitly learn that certain position types precede draw trajectories. The endgame
+pool (KR vs KR etc.) is the closest approximation — those positions are structurally
+associated with draw dynamics even as point data. But it is an approximation of
+the underlying topological truth.
+
+**The clean mathematical decomposition (2026-04-21):**
+
+Separate value from drawness explicitly:
+
+```
+q = P(win) - P(loss)     # value — side-to-move advantage, scalar in [-1, 1]
+d = P(draw)              # drawness — confidence that the position is structurally drawn
+
+P(win)  = (1 - d + q) / 2
+P(loss) = (1 - d - q) / 2
+P(draw) = d
+```
+
+This makes the distinction geometrically real:
+
+| Position | P(win) | P(draw) | P(loss) | q | d |
+|----------|--------|---------|---------|---|---|
+| Dead draw (KR vs KR) | .02 | .96 | .02 | 0 | .96 |
+| Sharp balanced | .45 | .10 | .45 | 0 | .10 |
+| Winning | .85 | .10 | .05 | +.80 | .10 |
+
+Both dead draw and sharp balanced have q=0 (value-equal) but d is completely different.
+The geometry gets a genuine second signal that is orthogonal to value.
+
+**Label semantics — balanced ≠ draw:**
+
+The codebase and training pipelines have conflated these throughout. They must be
+separated:
+
+- `|v| < threshold` from SF labels → **balanced** (near-equal, could go either way)
+- Structural/theoretical draw sources → **draw** (neither side can make progress)
+
+Structural draw sources (ground truth for d):
+- KR vs KR, KNN vs K, KB vs KB — endgame pool
+- Insufficient material positions
+- Tablebase-confirmed draws
+- PGN games ending in draw *from positions already near-equal* (lower confidence)
+- SF WDL draw probability if available at reeval time
+
+The `|v| < 0.1` Lichess bucket is balanced, not drawn. Using it as a draw anchor
+trains the model to treat "SF has no strong opinion" as draw-ness. That is wrong and
+is the root cause of the draw dimension never opening cleanly.
+
+**Decision path:**
+
+1. **Near term:** Keep scalar value head. Add an **auxiliary drawness head** — a
+   separate `Linear(128→1) + sigmoid` trained with BCE on structural draw sources
+   (endgame pool as positives, decisive positions as negatives). The drawness head
+   creates gradient pressure in the geometry space without changing the value signal.
+   The draw perp loss `L_draw = λ cos²(c_draw, axis)` is a temporary anti-collapse
+   regularizer only — it prevents midpoint collapse but creates a fake single draw
+   axis if used alone. Replace it with the drawness head once that is implemented.
+
+2. **Medium term:** WDL head with game-outcome labels combined with structural draw
+   anchors. The q/d decomposition above is the target output. Noisy from blunders
+   but structurally correct over large n.
+
+3. **Long term:** once trajectory data is available (self-play games with per-move
+   geometry embeddings), use path topology to detect draw — small geometry
+   displacement, oscillatory character, low Lyapunov exponent of the geometry
+   trajectory. Draw detection becomes topological rather than linear. The β1 probe
+   (loop identification → chess meaning) is the empirical bridge to this stage.
+
+**The decisive gate for draw understanding:**
+
+Not whether draw vectors sit between win and loss. Whether Petra can represent
+*"neither side can make progress"* separately from *"both sides have chances."*
+Sanity test: KR vs KR and a sharp balanced middlegame (SF eval ≈ 0, many captures
+available) should produce different drawness scores. Until that test passes,
+draw geometry is not solved.
+
 ---
 
 ## Long-Term Phases

@@ -18,6 +18,8 @@ module load cuda/12.1
 #   - Primary dataset: 800k Lichess positions, SF depth-18 labels
 #   - Anchor:          endgame_sf15.pt (956k positions, 45.8% near-zero draws)
 #   - anchor-frac 0.25 → ~200k endgame positions mixed in per epoch
+#   - draw-reg 0.02 → train auxiliary structural-draw head:
+#       structural endgame draws as positives, decisive positions as negatives
 #   - Total training set: ~1M positions per epoch
 #   - Endgame pool replaces the feb_sf anchor: KR vs KR, KNN vs K, KB vs KB
 #     stages ensure the draw dimension stays open
@@ -30,6 +32,7 @@ module load cuda/12.1
 #   rank        > 18.9  (feb_sf baseline)
 #   win·draw cos < 0.1676 (feb_sf baseline)
 #   KR vs KR sanity check: |value| < 0.35
+#   drawness: KR vs KR > 0.7, sharp balanced middlegame < 0.3
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 
@@ -39,6 +42,7 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --anchor-frac    0.25 \
     --init-model     /zhome/81/b/206091/Petra-ver2/models/feb_sf/best.pt \
     --rank-reg       0.1 \
+    --draw-reg       0.02 \
     --num-workers    0 \
     --weight-decay   5e-4 \
     --lr             5e-4 \

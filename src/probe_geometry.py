@@ -298,7 +298,53 @@ def check_known_positions(model: PetraNet, c_win: np.ndarray, c_loss: np.ndarray
 
 
 # ---------------------------------------------------------------------------
-# Check 4: Nearest-neighbour label consistency
+# Check 4: Structural drawness
+# ---------------------------------------------------------------------------
+
+def check_drawness(model: PetraNet):
+    print("\n" + "="*60)
+    print("CHECK 4 — Structural drawness")
+    print("="*60)
+
+    probes = [
+        ("KR vs KR structural draw",
+         chess.Board("8/3k4/8/r7/8/8/3K4/7R w - - 0 1"),
+         ">0.7"),
+        ("KNN vs K theoretical draw",
+         chess.Board("8/8/8/8/4k3/8/4NN2/4K3 w - - 0 1"),
+         ">0.7"),
+        ("Sharp balanced middlegame",
+         chess.Board("rnbqkbnr/pp1ppppp/8/2p5/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2"),
+         "<0.3"),
+        ("KQ vs K decisive",
+         chess.Board("4k3/8/8/8/8/8/8/4K2Q w - - 0 1"),
+         "<0.3"),
+    ]
+
+    passed = 0
+    for name, board, gate in probes:
+        d_val = model.drawness(board, device)
+        v_val = model.value(board, device)
+        if gate == ">0.7":
+            ok = d_val > 0.7
+        else:
+            ok = d_val < 0.3
+        passed += int(ok)
+        mark = "PASS" if ok else "FAIL"
+        print(f"  {mark:<4} {name:<32} drawness={d_val:.3f}  "
+              f"value={v_val:+.3f}  gate {gate}")
+
+    print(f"\n  Drawness gates passed: {passed}/{len(probes)}")
+    if passed == len(probes):
+        print("  GOOD — structural draws separate from balanced/decisive positions")
+    elif passed >= 2:
+        print("  WEAK — drawness signal exists but is not reliable yet")
+    else:
+        print("  NONE — drawness head is untrained or collapsed")
+
+
+# ---------------------------------------------------------------------------
+# Check 5: Nearest-neighbour label consistency
 # ---------------------------------------------------------------------------
 
 def check_nearest_neighbours(vecs: np.ndarray, values: np.ndarray, k: int = 5, n_probe: int = 200):
@@ -344,7 +390,7 @@ def check_nearest_neighbours(vecs: np.ndarray, values: np.ndarray, k: int = 5, n
 
 
 # ---------------------------------------------------------------------------
-# Check 5: Topological health
+# Check 6: Topological health
 # ---------------------------------------------------------------------------
 
 def check_topology(model: PetraNet, val_loader, n_sample: int = 300):
@@ -380,7 +426,12 @@ def main():
     args = ap.parse_args()
 
     model = PetraNet().to(device)
-    model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
+    sd = torch.load(args.model, map_location=device, weights_only=True)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    if missing:
+        print(f"  New/untrained parameters in model definition: {missing}")
+    if unexpected:
+        print(f"  Unexpected checkpoint parameters ignored: {unexpected}")
     model.eval()
     print(f"Loaded model from {args.model}")
 
@@ -391,6 +442,7 @@ def main():
     check_eigenvalue_distribution(vecs)
     c_win, c_loss = check_label_separation(vecs, values)
     check_known_positions(model, c_win, c_loss)
+    check_drawness(model)
     check_nearest_neighbours(vecs, values)
 
     # Build a minimal val_loader for the topology check
