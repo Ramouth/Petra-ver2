@@ -2,7 +2,7 @@
 #BSUB -J reeval_endgame_sf15
 #BSUB -q hpc
 #BSUB -n 16
-#BSUB -R "rusage[mem=4GB] select[hname!='n-62-21-89']"
+#BSUB -R "rusage[mem=1GB] select[hname!='n-62-21-89']"
 #BSUB -W 4:00
 #BSUB -o /zhome/81/b/206091/logs/reeval_endgame_sf15_%J.out
 #BSUB -e /zhome/81/b/206091/logs/reeval_endgame_sf15_%J.err
