@@ -146,6 +146,87 @@ def random_4piece_position(white_piece: int, black_piece: int,
         return board
 
 
+def random_krkr_position() -> chess.Board:
+    """KR vs KR — theoretically drawn; label 0.0."""
+    while True:
+        squares = random.sample(range(64), 4)
+        wk_sq, wr_sq, bk_sq, br_sq = squares
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING,  chess.WHITE))
+        board.set_piece_at(wr_sq, chess.Piece(chess.ROOK,  chess.WHITE))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING,  chess.BLACK))
+        board.set_piece_at(br_sq, chess.Piece(chess.ROOK,  chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_knnk_position() -> chess.Board:
+    """
+    KNN vs K — two knights cannot force checkmate; theoretically drawn; label 0.0.
+    Generates both orientations (white has knights OR black has knights) via the
+    same function — caller flips color externally if needed, or we just generate
+    both white-knight and black-knight variants at equal frequency.
+    """
+    while True:
+        squares = random.sample(range(64), 4)
+        wk_sq, wn1_sq, wn2_sq, bk_sq = squares
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq,  chess.Piece(chess.KING,   chess.WHITE))
+        board.set_piece_at(wn1_sq, chess.Piece(chess.KNIGHT, chess.WHITE))
+        board.set_piece_at(wn2_sq, chess.Piece(chess.KNIGHT, chess.WHITE))
+        board.set_piece_at(bk_sq,  chess.Piece(chess.KING,   chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_knnk_mirror_position() -> chess.Board:
+    """KNN vs K with black holding the knights."""
+    while True:
+        squares = random.sample(range(64), 4)
+        wk_sq, bk_sq, bn1_sq, bn2_sq = squares
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq,  chess.Piece(chess.KING,   chess.WHITE))
+        board.set_piece_at(bk_sq,  chess.Piece(chess.KING,   chess.BLACK))
+        board.set_piece_at(bn1_sq, chess.Piece(chess.KNIGHT, chess.BLACK))
+        board.set_piece_at(bn2_sq, chess.Piece(chess.KNIGHT, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
+def random_kbkb_position() -> chess.Board:
+    """KB vs KB — equal minor pieces; drawn; label 0.0."""
+    while True:
+        squares = random.sample(range(64), 4)
+        wk_sq, wb_sq, bk_sq, bb_sq = squares
+
+        board = chess.Board(fen=None)
+        board.clear()
+        board.set_piece_at(wk_sq, chess.Piece(chess.KING,   chess.WHITE))
+        board.set_piece_at(wb_sq, chess.Piece(chess.BISHOP, chess.WHITE))
+        board.set_piece_at(bk_sq, chess.Piece(chess.KING,   chess.BLACK))
+        board.set_piece_at(bb_sq, chess.Piece(chess.BISHOP, chess.BLACK))
+        board.turn = chess.WHITE
+
+        if not board.is_valid() or board.is_game_over():
+            continue
+        return board
+
+
 def random_kp_kp_position(white_more_advanced: bool = True) -> chess.Board:
     """
     KP vs KP — both sides have a pawn, more-advanced pawn wins.
@@ -191,35 +272,44 @@ def random_kp_kp_position(white_more_advanced: bool = True) -> chess.Board:
 _PAWN_RANKS = list(range(1, 7))
 
 _STAGE_GENERATORS = {
-    # pos_fn returns "white wins" position; mirror_fn returns "black wins" position
+    # (pos_fn, mirror_fn, label_type)
+    # 'decisive': white wins in pos_fn, black wins in mirror_fn → labels ±1.0
+    # 'draw':     both fns return drawn positions → label always 0.0
     1: (lambda: random_kqk_position(white_has_queen=True),
-        lambda: random_kqk_position(white_has_queen=False)),
+        lambda: random_kqk_position(white_has_queen=False), 'decisive'),
     2: (lambda: random_krk_position(white_has_rook=True),
-        lambda: random_krk_position(white_has_rook=False)),
+        lambda: random_krk_position(white_has_rook=False),  'decisive'),
     3: (lambda: random_kpk_position(white_has_pawn=True),
-        lambda: random_kpk_position(white_has_pawn=False)),
+        lambda: random_kpk_position(white_has_pawn=False),  'decisive'),
     4: (lambda: random_4piece_position(chess.QUEEN, chess.ROOK),
-        lambda: random_4piece_position(chess.ROOK,  chess.QUEEN)),
+        lambda: random_4piece_position(chess.ROOK,  chess.QUEEN), 'decisive'),
     5: (lambda: random_4piece_position(chess.ROOK, chess.PAWN,
                                         black_piece_on_ranks=_PAWN_RANKS),
         lambda: random_4piece_position(chess.PAWN, chess.ROOK,
-                                        white_piece_on_ranks=_PAWN_RANKS)),
+                                        white_piece_on_ranks=_PAWN_RANKS), 'decisive'),
     6: (lambda: random_4piece_position(chess.BISHOP, chess.PAWN,
                                         black_piece_on_ranks=_PAWN_RANKS),
         lambda: random_4piece_position(chess.PAWN, chess.BISHOP,
-                                        white_piece_on_ranks=_PAWN_RANKS)),
+                                        white_piece_on_ranks=_PAWN_RANKS), 'decisive'),
     7: (lambda: random_4piece_position(chess.KNIGHT, chess.PAWN,
                                         black_piece_on_ranks=_PAWN_RANKS),
         lambda: random_4piece_position(chess.PAWN, chess.KNIGHT,
-                                        white_piece_on_ranks=_PAWN_RANKS)),
+                                        white_piece_on_ranks=_PAWN_RANKS), 'decisive'),
     8: (lambda: random_kp_kp_position(white_more_advanced=True),
-        lambda: random_kp_kp_position(white_more_advanced=False)),
+        lambda: random_kp_kp_position(white_more_advanced=False), 'decisive'),
+    # --- Drawn stages ---
+    # label_type='draw' → both fns generate drawn positions; label always 0.0.
+    # No color-swap mirror needed (material is symmetric or unwinnable by theory).
+    9:  (random_krkr_position,      random_krkr_position,      'draw'),
+    10: (random_knnk_position,      random_knnk_mirror_position, 'draw'),
+    11: (random_kbkb_position,      random_kbkb_position,      'draw'),
 }
 
 STAGE_NAMES = {
-    1: "KQ vs K", 2: "KR vs K", 3: "KP vs K",
-    4: "KQ vs KR", 5: "KR vs KP", 6: "KB vs KP",
+    1: "KQ vs K",  2: "KR vs K",   3: "KP vs K",
+    4: "KQ vs KR", 5: "KR vs KP",  6: "KB vs KP",
     7: "KN vs KP", 8: "KP vs KP",
+    9: "KR vs KR (draw)", 10: "KNN vs K (draw)", 11: "KB vs KB (draw)",
 }
 
 
@@ -281,38 +371,59 @@ def generate_positions(n: int, include_mirrors: bool = True, stages=None):
 
     all_positions = []
     for stage, n_stage in zip(stages, n_per_stage):
-        pos_fn, mirror_fn = _STAGE_GENERATORS[stage]
+        pos_fn, mirror_fn, label_type = _STAGE_GENERATORS[stage]
         generated = 0
         seen_fens = set()
 
         while generated < n_stage:
-            # Primary position — white side has the winning piece
             board = pos_fn()
             fen = board.board_fen()
             if fen in seen_fens:
                 continue
             seen_fens.add(fen)
 
-            # White to move: white wins → +1.0
-            all_positions.append((board, +1.0))
+            if label_type == 'draw':
+                # Drawn endgame: label 0.0 regardless of turn or color.
+                all_positions.append((board, 0.0))
+                board_btm = board.copy()
+                board_btm.turn = chess.BLACK
+                if board_btm.is_valid() and not board_btm.is_game_over():
+                    all_positions.append((board_btm, 0.0))
 
-            # Same position, black to move: white still has piece but black to move → -1.0
-            board_btm = board.copy()
-            board_btm.turn = chess.BLACK
-            if board_btm.is_valid() and not board_btm.is_game_over():
-                all_positions.append((board_btm, -1.0))
+                if include_mirrors:
+                    # For drawn stages, mirror_fn generates a fresh position of the
+                    # same material type (no color-swap needed — material is symmetric).
+                    mirror = mirror_fn()
+                    m_fen = mirror.board_fen()
+                    if m_fen not in seen_fens:
+                        seen_fens.add(m_fen)
+                        all_positions.append((mirror, 0.0))
+                        mirror_btm = mirror.copy()
+                        mirror_btm.turn = chess.BLACK
+                        if mirror_btm.is_valid() and not mirror_btm.is_game_over():
+                            all_positions.append((mirror_btm, 0.0))
+            else:
+                # Decisive endgame: white wins in pos_fn, black wins in mirror_fn.
+                # White to move: white wins → +1.0
+                all_positions.append((board, +1.0))
 
-            if include_mirrors:
-                # Color-swapped antipodal: same squares, piece colors inverted.
-                # White to move but white now has the bare king → white loses → -1.0
-                mirror = _color_swap(board)
-                if mirror is not None:
-                    all_positions.append((mirror, -1.0))
-                    # Black to move with the winning piece → STM (black) wins → +1.0
-                    mirror_btm = mirror.copy()
-                    mirror_btm.turn = chess.BLACK
-                    if mirror_btm.is_valid() and not mirror_btm.is_game_over():
-                        all_positions.append((mirror_btm, +1.0))
+                # Same position, black to move: white still has piece but black to move → -1.0
+                board_btm = board.copy()
+                board_btm.turn = chess.BLACK
+                if board_btm.is_valid() and not board_btm.is_game_over():
+                    all_positions.append((board_btm, -1.0))
+
+                if include_mirrors:
+                    # Color-swapped antipodal: same squares, piece colors inverted.
+                    # White to move but white now has the bare king → white loses → -1.0
+                    mirror = _color_swap(board)
+                    if mirror is not None:
+                        all_positions.append((mirror, -1.0))
+                        # Black to move with the winning piece → STM (black) wins → +1.0
+                        mirror_btm = mirror.copy()
+                        mirror_btm.turn = chess.BLACK
+                        if mirror_btm.is_valid() and not mirror_btm.is_game_over():
+                            all_positions.append((mirror_btm, +1.0))
 
             generated += 1
 
@@ -448,7 +559,8 @@ def main():
                     help="Number of base positions per stage (mirrors included automatically)")
     ap.add_argument("--stages",     type=int, nargs="+", default=[1],
                     help="Stages to mix: 1=KQK 2=KRK 3=KPK 4=KQvKR 5=KRvKP "
-                         "6=KBvKP 7=KNvKP 8=KPvKP (default: 1)")
+                         "6=KBvKP 7=KNvKP 8=KPvKP "
+                         "9=KRvKR(draw) 10=KNNvK(draw) 11=KBvKB(draw) (default: 1)")
     ap.add_argument("--out",        required=True,
                     help="Output .pt file path")
     ap.add_argument("--no-mirrors", action="store_true",
