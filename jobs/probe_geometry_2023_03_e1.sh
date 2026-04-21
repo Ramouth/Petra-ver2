@@ -9,7 +9,6 @@
 
 source /zhome/81/b/206091/petra-env/bin/activate
 module load gcc/13.4.0-binutils-2.44
-module load cuda/12.1
 
 # Geometry probe for lichess_2023_03 1-epoch model.
 #
@@ -25,5 +24,4 @@ BLACKHOLE="/dtu/blackhole/0b/206091"
 python3 -u /zhome/81/b/206091/Petra-ver2/src/probe_geometry.py \
     --model   /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03_e1/best.pt \
     --dataset ${BLACKHOLE}/dataset_2023_03_sf18.pt \
-    --strict \
     --n 5000
