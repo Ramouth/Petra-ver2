@@ -470,9 +470,15 @@ def label_with_stockfish(positions, stockfish_path: str, depth: int = 5):
 # Dataset builder
 # ---------------------------------------------------------------------------
 
-def build_dataset(positions, val_frac: float = 0.1):
+def build_dataset(positions, val_frac: float = 0.1,
+                   store_visit_dists: bool = True):
     """
     Convert list of (board, value) to a train.py-compatible dataset dict.
+
+    store_visit_dists=False: skip the 4096-float visit_dists tensor entirely.
+    Use this when building a raw intermediate file for SF re-evaluation —
+    reeval_stockfish.py only reads FENs and tensors; visit_dists are wasted
+    memory (4096 floats × N positions can be tens of GB for large datasets).
 
     Policy target: uniform over legal moves. Policy loss on endgame positions
     without MCTS is not meaningful — use --policy-weight 0 in train.py to
@@ -491,37 +497,41 @@ def build_dataset(positions, val_frac: float = 0.1):
 
     data = {}
     for split_name, split in splits.items():
-        tensors     = []
-        values      = []
-        move_idxs   = []
-        visit_dists = []
-        fens        = []
+        tensors   = []
+        values    = []
+        move_idxs = []
+        vds       = [] if store_visit_dists else None
+        fens      = []
 
         for board, value in split:
             tensors.append(board_to_tensor(board))
             values.append(value)
             fens.append(board.fen())
 
-            # Uniform policy over legal moves in STM-relative coordinates
             flip  = (board.turn == chess.BLACK)
             legal = list(board.legal_moves)
-            vd    = torch.zeros(4096, dtype=torch.float32)
             if legal:
-                w = 1.0 / len(legal)
-                for m in legal:
-                    vd[move_to_index(m, flip=flip)] = w
                 move_idxs.append(move_to_index(legal[0], flip=flip))
             else:
                 move_idxs.append(0)
-            visit_dists.append(vd)
 
-        data[split_name] = {
-            "tensors":     torch.stack(tensors).to(torch.uint8),
-            "values":      torch.tensor(values, dtype=torch.float32),
-            "move_idxs":   torch.tensor(move_idxs, dtype=torch.int64),
-            "visit_dists": torch.stack(visit_dists),
-            "fens":        fens,
+            if store_visit_dists:
+                vd = torch.zeros(4096, dtype=torch.float32)
+                if legal:
+                    w = 1.0 / len(legal)
+                    for m in legal:
+                        vd[move_to_index(m, flip=flip)] = w
+                vds.append(vd)
+
+        split_data = {
+            "tensors":   torch.stack(tensors).to(torch.uint8),
+            "values":    torch.tensor(values, dtype=torch.float32),
+            "move_idxs": torch.tensor(move_idxs, dtype=torch.int64),
+            "fens":      fens,
         }
+        if store_visit_dists:
+            split_data["visit_dists"] = torch.stack(vds)
+        data[split_name] = split_data
 
     n_train    = len(data["train"]["tensors"])
     n_val_act  = len(data["val"]["tensors"])
@@ -565,6 +575,10 @@ def main():
                     help="Output .pt file path")
     ap.add_argument("--no-mirrors", action="store_true",
                     help="Skip antipodal mirror positions (not recommended)")
+    ap.add_argument("--no-visit-dists", action="store_true",
+                    help="Skip storing visit_dists (4096-float policy targets). "
+                         "Use when building a raw intermediate file for SF re-evaluation "
+                         "— saves ~16GB for 1M positions.")
     ap.add_argument("--stockfish",  default=None,
                     help="Stockfish binary path for label verification (optional)")
     ap.add_argument("--depth",      type=int, default=5,
@@ -588,7 +602,7 @@ def main():
         positions = label_with_stockfish(positions, args.stockfish, args.depth)
 
     print("\nBuilding dataset ...")
-    data = build_dataset(positions)
+    data = build_dataset(positions, store_visit_dists=not args.no_visit_dists)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(data, args.out)

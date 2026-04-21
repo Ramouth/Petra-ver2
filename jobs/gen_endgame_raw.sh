@@ -2,7 +2,7 @@
 #BSUB -J gen_endgame_raw
 #BSUB -q hpc
 #BSUB -n 1
-#BSUB -R "rusage[mem=8GB]"
+#BSUB -R "rusage[mem=4GB]"
 #BSUB -W 0:30
 #BSUB -o /zhome/81/b/206091/logs/gen_endgame_raw_%J.out
 #BSUB -e /zhome/81/b/206091/logs/gen_endgame_raw_%J.err
@@ -20,7 +20,10 @@
 #   bsub -env "CHUNK_IDX=2" < jobs/reeval_endgame_sf15.sh
 #   bsub -env "CHUNK_IDX=3" < jobs/reeval_endgame_sf15.sh
 
-N="${N:-1000000}"
+# 250k base positions × 11 stages × ~4 mirror/turn variants ≈ 1M total positions.
+# visit_dists are skipped — reeval_stockfish.py only needs FENs; storing 4096
+# floats per position would require ~16GB for 1M positions.
+N="${N:-250000}"
 SEED="${SEED:-42}"
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
@@ -35,10 +38,11 @@ echo
 source "${HOME_DIR}/petra-env/bin/activate"
 
 python3 -u "${SRC}/generate_endgame.py" \
-    --positions ${N} \
-    --stages 1 2 3 4 5 6 7 8 9 10 11 \
-    --seed   ${SEED} \
-    --out    "${OUT_FILE}"
+    --positions     ${N} \
+    --stages        1 2 3 4 5 6 7 8 9 10 11 \
+    --seed          ${SEED} \
+    --no-visit-dists \
+    --out           "${OUT_FILE}"
 
 echo
 echo "Done. Raw dataset: ${OUT_FILE}"
