@@ -310,7 +310,8 @@ def _game_worker(args):
         if not path:
             return None
         m = PetraNet()
-        m.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+        m.load_state_dict(torch.load(path, map_location="cpu", weights_only=True),
+                          strict=False)
         m.eval()
         return m
 
@@ -638,7 +639,7 @@ def main():
     if args.model:
         model = PetraNet().to(device)
         model.load_state_dict(torch.load(args.model, map_location=device,
-                                         weights_only=True))
+                                         weights_only=True), strict=False)
         model.eval()
         print(f"Loaded model from {args.model}")
     elif args.step != 1:
@@ -650,7 +651,7 @@ def main():
         baseline_model = PetraNet().to(device)
         baseline_model.load_state_dict(torch.load(args.baseline_model,
                                                    map_location=device,
-                                                   weights_only=True))
+                                                   weights_only=True), strict=False)
         baseline_model.eval()
         print(f"Loaded baseline model from {args.baseline_model}")
 
