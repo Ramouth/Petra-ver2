@@ -50,13 +50,17 @@ echo
 source "${HOME_DIR}/petra-env/bin/activate"
 
 python3 -u "${SRC}/reeval_stockfish.py" \
-    --dataset "${IN_FILE}" \
-    --out     "${OUT_FILE}" \
-    --merge   ${PARTIALS} \
-    --n       ${N} \
-    --seed    ${SEED} \
-    --min-decisive 0.0 \
-    --max-pieces   32
+    --dataset                      "${IN_FILE}" \
+    --out                          "${OUT_FILE}" \
+    --merge                        ${PARTIALS} \
+    --n                            ${N} \
+    --seed                         ${SEED} \
+    --min-decisive                 0.0 \
+    --max-pieces                   32 \
+    --derive-drawness-from-outcome \
+    --drawness-game-level \
+    --drawness-sf-threshold        0.11 \
+    --drawness-target              0.8
 
 echo
 echo "Done. Final dataset: ${OUT_FILE}"
