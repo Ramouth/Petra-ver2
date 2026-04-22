@@ -115,7 +115,8 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 positions_per_game: int = MAX_POSITIONS_PER_GAME,
                 sampling: str = "random",
                 max_pieces: int = 0,
-                decisive_only: bool = False):
+                decisive_only: bool = False,
+                max_elo: int = 0):
     """
     Generator. Yields (game_id, result, [(board, move), ...]) for each
     accepted game. Applies all game-level filters inline.
@@ -142,11 +143,14 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 games_skipped += 1
                 continue
 
-            if min_elo > 0:
+            if min_elo > 0 or max_elo > 0:
                 try:
                     w = int(game.headers.get("WhiteElo", "0") or "0")
                     b = int(game.headers.get("BlackElo", "0") or "0")
-                    if w < min_elo or b < min_elo:
+                    if min_elo > 0 and (w < min_elo or b < min_elo):
+                        games_skipped += 1
+                        continue
+                    if max_elo > 0 and (w > max_elo or b > max_elo):
                         games_skipped += 1
                         continue
                 except ValueError:
@@ -190,6 +194,7 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
 def parse_pgn(pgn_path: str,
               max_games: int = 200_000,
               min_elo: int = 0,
+              max_elo: int = 0,
               require_normal_termination: bool = True,
               seed: int = 42,
               skip_opening: int = SKIP_OPENING_MOVES,
@@ -234,7 +239,8 @@ def parse_pgn(pgn_path: str,
     for game_id, result, sampled_pairs in _iter_games(
             pgn_path, max_games, min_elo, require_normal_termination, rng,
             skip_opening=skip_opening, positions_per_game=positions_per_game,
-            sampling=sampling, max_pieces=max_pieces, decisive_only=decisive_only):
+            sampling=sampling, max_pieces=max_pieces, decisive_only=decisive_only,
+            max_elo=max_elo):
 
         if _stop_early:
             print(f"\n  Signal received — stopping after {game_id:,} games.", flush=True)
@@ -636,6 +642,8 @@ def main():
     ap.add_argument("--max-games",     type=int, default=100_000)
     ap.add_argument("--min-elo",       type=int, default=1500,
                     help="Minimum Elo for both players (0 = no filter)")
+    ap.add_argument("--max-elo",       type=int, default=0,
+                    help="Maximum Elo for both players (0 = no filter)")
     ap.add_argument("--no-termination-filter", action="store_true",
                     help="Include games that ended by timeout/abandon")
     ap.add_argument("--validate-only", action="store_true",
@@ -680,6 +688,7 @@ def main():
             pgn_path=args.pgn,
             max_games=args.max_games,
             min_elo=args.min_elo,
+            max_elo=args.max_elo,
             require_normal_termination=not args.no_termination_filter,
             seed=args.seed,
             skip_opening=args.skip_opening,
