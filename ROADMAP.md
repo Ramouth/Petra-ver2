@@ -616,9 +616,10 @@ Changes from Round 2 (sf_balanced):
 - [x] Win/loss centroid cosine < 0.85 — *Doover 2 R2 (sf_balanced): 0.0802*
 - [x] Win/loss centroid cosine < 0.00 — *Doover 2 R1 (endgame): -0.9999*
 - [x] KQ vs K AND K vs KQ both correct — *Doover 2 R2 (sf_balanced): both ✓*
-- [ ] Effective rank > 30 — *Doover 2 R2: 7.2/128*
-- [ ] Draw dimension: win·draw cosine < 0.10 — *currently 0.2657*
-- [ ] Separation gap > 0.10 with rank > 30 — *gap 0.2014 but rank still low*
+- [ ] Effective rank > 30 — *best: lichess_2023_03_endgame 21.6/128*
+- [ ] Draw dimension: win·draw cosine < 0.10 — *currently 0.6885 (drawness model)*
+- [ ] Separation gap > 0.10 with rank > 30 — *gap present but rank still low*
+- [ ] Drawness: KR vs KR > 0.7 AND sharp balanced < 0.3 — *2/4 gates (KNN vs K ✓, KQ vs K ✓)*
 
 ### Self-play
 - [x] 1k self-play positions trained
@@ -1035,6 +1036,88 @@ Not whether draw vectors sit between win and loss. Whether Petra can represent
 Sanity test: KR vs KR and a sharp balanced middlegame (SF eval ≈ 0, many captures
 available) should produce different drawness scores. Until that test passes,
 draw geometry is not solved.
+
+---
+
+## Session 11 — Drawness Bootstrap Attempts + Low-ELO Strategy (2026-04-22)
+
+### Context
+
+Best model entering this session: `lichess_2023_03_endgame/best.pt`
+- Rank: 21.6 / 128
+- KR vs KR value: +0.072 (correct near-zero)
+- No drawness head
+
+### Attempt 1 — Freeze-backbone bootstrap (jobs 28258816, 28258858)
+
+Trained auxiliary drawness head (129 params) on generated endgame positions with
+explicit drawness targets. Backbone frozen to prevent rank regression.
+
+Results: drawness gap +0.956 (structural draws clearly separated) but rank collapsed
+21.6 → 14.7 in first attempt. Frozen-backbone attempt regressed to 18.3 after 5
+epochs. Root cause: pure endgame training forces geometry into low-dimensional
+win/loss subspace even with frozen backbone, because value gradient still reshapes
+the geometry indirectly.
+
+**Decision:** Abandon pure endgame bootstrap. Drawness must be learned alongside
+regular Lichess training to preserve rank diversity.
+
+### Attempt 2 — Anchor in regular training (job 28261028)
+
+`lichess_2023_03_drawness` — trained on `dataset_2023_03_sf18.pt` with
+`endgame_drawness.pt` anchor at 15%, draw-reg=0.05.
+
+| Metric | Value |
+|--------|-------|
+| Rank | 19.5 / 128 (regressed from 21.6) |
+| KR vs KR drawness | 0.658 (gate >0.7, FAIL) |
+| KNN vs K drawness | 0.761 ✓ |
+| Sharp balanced drawness | 0.410 (gate <0.3, FAIL) |
+| ELO vs lichess_2023_03_endgame | **-37 ELO (44.8% WR)** ✗ |
+
+**Verdict:** Rank regression (21.6 → 19.5) from anchor mixing cost more than
+drawness head gained. Drawness signal too weak (0.658 structural) to compensate.
+`lichess_2023_03_endgame` remains the best model.
+
+### Root cause analysis
+
+The draw_reg BCE loss backprops through the geometry (not just the drawness head),
+so even 12% anchor batch fraction reshapes the geometry toward the endgame subspace.
+Endgame positions have lower diversity than full Lichess → rank collapses.
+Drawness doesn't generalize cleanly: Sicilian getting 0.41 means balanced tactical
+positions are confused with structural draws.
+
+### New strategy — Low-ELO games for both rank and drawness
+
+**Hypothesis:** 1600-1850 ELO games contain more varied positions (non-theory
+openings, unusual piece placements, more games reaching structural draw endings)
+→ higher geometry rank AND better real drawness examples.
+
+**Key improvement — game-level drawness derivation:**
+
+Old: mark position if `game_outcome=draw AND |SF_eval| < 0.15 AND ply >= 40`
+New: mark game if `game_outcome=draw AND max(|SF_eval|) < 0.11 across ALL sampled
+positions in that game`
+
+This excludes games where one side had a big advantage but blundered to a draw —
+those are not structural draws. Only games that stayed quiet throughout qualify.
+
+**Pipeline (in progress):**
+1. `parse_low_elo_2025_01.sh` — parsing now (job 28261745, ~23h)
+   - 2025-01 Lichess PGN, ELO band 1600-1850, 100k games
+2. `reeval_low_elo.sh` — SF depth-18 + game-level drawness at threshold 0.11
+   - 500k positions sampled (5 per game avg), 24h wall
+3. `train_low_elo_gpu.sh` — init from `lichess_2023_03_drawness`, rank-reg=0.1,
+   draw-reg=0.005 (10× lower than before to minimise geometry gradient)
+
+**Gates:**
+- Rank > 21.6 (must beat current best)
+- ELO vs `lichess_2023_03_endgame` > 50%
+- KR vs KR drawness > 0.7 AND sharp balanced < 0.3
+
+If rank improves: drawness can be cleanly layered on top via freeze-backbone
+(no rank gradient, just 129 params). If rank stalls at ~21-22 across data
+strategies → architecture is the ceiling.
 
 ---
 
