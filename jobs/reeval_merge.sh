@@ -8,14 +8,20 @@
 #BSUB -e /zhome/81/b/206091/logs/reeval_merge_%J.err
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Must match the values used in reeval_depth18.sh:
-#   bsub -env "MONTH=03,YEAR=2023,DEPTH=18,N_CHUNKS=4,N=800000" < jobs/reeval_merge.sh
+# N_CHUNKS_DONE controls how many partial files to merge (for iterative rounds).
+# ROUND is appended to the output filename so each round produces a distinct file.
+#
+#   bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=4,ROUND=1"  < jobs/reeval_merge.sh
+#   bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=8,ROUND=2"  < jobs/reeval_merge.sh
+#   bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=12,ROUND=3" < jobs/reeval_merge.sh
 
 MONTH="${MONTH:-03}"
 YEAR="${YEAR:-2023}"
 DEPTH="${DEPTH:-18}"
-N_CHUNKS="${N_CHUNKS:-4}"
-N="${N:-800000}"
+N_CHUNKS="${N_CHUNKS:-12}"
+N_CHUNKS_DONE="${N_CHUNKS_DONE:-${N_CHUNKS}}"
+N="${N:-3000000}"
+ROUND="${ROUND:-1}"
 SEED=42
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
@@ -23,21 +29,21 @@ HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
 IN_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}.pt"
-OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}_sf${DEPTH}.pt"
+OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}_sf${DEPTH}_r${ROUND}.pt"
 
-# Build the list of partial files
+# Build the list of partial files (chunks 0 .. N_CHUNKS_DONE-1)
 PARTIALS=""
-for i in $(seq 0 $((N_CHUNKS - 1))); do
+for i in $(seq 0 $((N_CHUNKS_DONE - 1))); do
     PART="${BLACKHOLE}/reeval_${YEAR}_${MONTH}_d${DEPTH}_part${i}.pt"
     if [ ! -f "${PART}" ]; then
         echo "ERROR: missing partial file: ${PART}"
-        echo "Ensure all ${N_CHUNKS} chunk jobs have completed."
+        echo "Ensure chunks 0-$((N_CHUNKS_DONE - 1)) have completed."
         exit 1
     fi
     PARTIALS="${PARTIALS} ${PART}"
 done
 
-echo "=== Merging ${N_CHUNKS} chunks (depth ${DEPTH}) → ${OUT_FILE} ==="
+echo "=== Merging chunks 0-$((N_CHUNKS_DONE-1)) of ${N_CHUNKS} (depth ${DEPTH}, round ${ROUND}) → ${OUT_FILE} ==="
 echo "Partials:${PARTIALS}"
 echo
 

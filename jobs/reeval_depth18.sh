@@ -8,26 +8,33 @@
 #BSUB -e /zhome/81/b/206091/logs/reeval_depth18_%J.err
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Set MONTH, YEAR, and CHUNK_IDX before submitting.
-# Use -env to pass variables — plain "VAR=val bsub < script" is unreliable on
-# some LSF configurations and the job will silently fall back to defaults.
+# Iterative reeval: 3M positions split into 12 chunks of 250k, submitted in
+# rounds of 4. Train after each round, then submit the next 4 chunks.
 #
-#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=0" < jobs/reeval_depth18.sh
-#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=1" < jobs/reeval_depth18.sh
-#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=2" < jobs/reeval_depth18.sh
-#   bsub -env "MONTH=03,YEAR=2023,CHUNK_IDX=3" < jobs/reeval_depth18.sh
+# Round 1 (chunks 0-3):
+#   bsub -env "MONTH=01,YEAR=2025,CHUNK_IDX=0" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=01,YEAR=2025,CHUNK_IDX=1" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=01,YEAR=2025,CHUNK_IDX=2" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=01,YEAR=2025,CHUNK_IDX=3" < jobs/reeval_depth18.sh
+#   bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=4,ROUND=1" < jobs/reeval_merge.sh
 #
-# After all 4 finish, run the merge job:
-#   bsub -env "MONTH=03,YEAR=2023" < jobs/reeval_merge.sh
+# Round 2 (chunks 4-7) — after training on round 1:
+#   bsub -env "MONTH=01,YEAR=2025,CHUNK_IDX=4" < jobs/reeval_depth18.sh
+#   ...CHUNK_IDX=5,6,7...
+#   bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=8,ROUND=2" < jobs/reeval_merge.sh
 #
-# If a chunk hits the wall, it saves a checkpoint with however far it got.
-# The merge will report which positions are missing — resubmit that CHUNK_IDX.
+# Round 3 (chunks 8-11):
+#   bsub -env "MONTH=01,YEAR=2025,CHUNK_IDX=8" < jobs/reeval_depth18.sh
+#   ...CHUNK_IDX=9,10,11...
+#   bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=12,ROUND=3" < jobs/reeval_merge.sh
+#
+# If a chunk hits the wall, it saves a checkpoint. Resubmit that CHUNK_IDX.
 
 MONTH="${MONTH:-03}"
 YEAR="${YEAR:-2023}"
 CHUNK_IDX="${CHUNK_IDX:-0}"
-N_CHUNKS=4          # 800k positions / 4 = 200k per chunk → ~6-8h at depth 18
-N=800000
+N_CHUNKS="${N_CHUNKS:-12}"
+N="${N:-3000000}"
 SEED=42
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
