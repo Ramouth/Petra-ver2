@@ -398,6 +398,7 @@ def _apply_filter_and_save(
         drawness_min_ply: int = 40,
         drawness_target: float = 0.7,
         drawness_max_pieces: int = 32,
+        drawness_game_level: bool = False,
         extra_meta: dict = None,
 ):
     """
@@ -548,11 +549,50 @@ def _apply_filter_and_save(
                 "with outcome_values and plys. Re-parse the PGN with the updated data.py."
             )
 
-        candidate = (
-            (all_outcome_values.float().abs() < 1e-4) &
-            (new_values.float().abs() < drawness_sf_threshold) &
-            (all_plys.long() >= drawness_min_ply)
-        )
+        if drawness_game_level:
+            # Game-level: a game is a structural draw only if the SF eval
+            # NEVER exceeded the threshold for any of its sampled positions.
+            # Excludes games where someone had a big advantage but blundered
+            # back to 0 — those are not structural draws.
+            if all_game_ids is None:
+                raise ValueError(
+                    "--drawness-game-level requires game_ids in the dataset. "
+                    "Re-parse the PGN with the updated data.py."
+                )
+            is_draw = all_outcome_values.float().abs() < 1e-4
+            abs_vals = new_values.float().abs()
+            game_ids_np = all_game_ids.numpy() if hasattr(all_game_ids, 'numpy') else all_game_ids
+
+            # For each game, find max |SF eval| across all its positions
+            from collections import defaultdict
+            game_max_eval: dict = defaultdict(float)
+            game_is_draw: dict  = defaultdict(bool)
+            for i in range(n):
+                gid = int(game_ids_np[i])
+                game_is_draw[gid] = bool(is_draw[i].item())
+                cur = float(abs_vals[i].item())
+                if cur > game_max_eval[gid]:
+                    game_max_eval[gid] = cur
+
+            candidate = torch.zeros(n, dtype=torch.bool)
+            for i in range(n):
+                gid = int(game_ids_np[i])
+                if game_is_draw[gid] and game_max_eval[gid] < drawness_sf_threshold:
+                    candidate[i] = True
+
+            print(f"\nDrawness derived from drawn games (game-level):")
+            print(f"  outcome draw & max|SF| across all positions < {drawness_sf_threshold}")
+        else:
+            # Position-level: each position checked independently
+            candidate = (
+                (all_outcome_values.float().abs() < 1e-4) &
+                (new_values.float().abs() < drawness_sf_threshold) &
+                (all_plys.long() >= drawness_min_ply)
+            )
+            print(f"\nDrawness derived from drawn games (position-level):")
+            print(f"  outcome draw & |SF|<{drawness_sf_threshold} & ply>={drawness_min_ply}"
+                  f" & pieces<={drawness_max_pieces}")
+
         if drawness_max_pieces < 32:
             piece_ok = torch.tensor([
                 bin(int(chess.Board(fen).occupied)).count("1") <= drawness_max_pieces
@@ -568,9 +608,6 @@ def _apply_filter_and_save(
         )
         all_drawness_available = torch.ones(n, dtype=torch.bool)
 
-        print(f"\nDrawness derived from drawn games:")
-        print(f"  outcome draw & |SF|<{drawness_sf_threshold} & ply>={drawness_min_ply}"
-              f" & pieces<={drawness_max_pieces}")
         print(f"  positives: {n_drawness_from_outcome:,} / {n:,}  target={drawness_target:.2f}")
 
     # Restore train/val split
@@ -716,7 +753,8 @@ def merge_partials(dataset_path: str,
                    drawness_sf_threshold: float = 0.15,
                    drawness_min_ply: int = 40,
                    drawness_target: float = 0.7,
-                   drawness_max_pieces: int = 32):
+                   drawness_max_pieces: int = 32,
+                   drawness_game_level: bool = False):
     """
     Merge chunk partial files into a final dataset.
 
@@ -833,6 +871,7 @@ def merge_partials(dataset_path: str,
         drawness_min_ply=drawness_min_ply,
         drawness_target=drawness_target,
         drawness_max_pieces=drawness_max_pieces,
+        drawness_game_level=drawness_game_level,
         extra_meta={"source": dataset_path, "stockfish_depth": partials[0]["depth"]},
     )
 
@@ -854,7 +893,8 @@ def reeval(dataset_path: str,
            drawness_sf_threshold: float = 0.15,
            drawness_min_ply: int = 40,
            drawness_target: float = 0.7,
-           drawness_max_pieces: int = 32):
+           drawness_max_pieces: int = 32,
+           drawness_game_level: bool = False):
     """
     Load dataset, re-evaluate all positions in one job, save new dataset.
 
@@ -892,6 +932,7 @@ def reeval(dataset_path: str,
         drawness_min_ply=drawness_min_ply,
         drawness_target=drawness_target,
         drawness_max_pieces=drawness_max_pieces,
+        drawness_game_level=drawness_game_level,
         extra_meta={"source": dataset_path, "stockfish_depth": depth},
     )
 
@@ -958,6 +999,12 @@ Modes
     ap.add_argument("--drawness-max-pieces", type=int, default=32,
                     help="Optional piece-count cap for drawn-game drawness positives "
                          "(default: 32 = no extra cap).")
+    ap.add_argument("--drawness-game-level", action="store_true",
+                    help="Game-level drawness: mark all positions in a drawn game only "
+                         "if the SF eval NEVER exceeded --drawness-sf-threshold for any "
+                         "sampled position in that game. Stricter than the default "
+                         "per-position check — excludes games where one side was winning "
+                         "but blundered back to a draw.")
 
     # Chunked mode
     ap.add_argument("--chunk-idx",   type=int, default=None,
@@ -994,6 +1041,7 @@ Modes
             drawness_min_ply=args.drawness_min_ply,
             drawness_target=args.drawness_target,
             drawness_max_pieces=args.drawness_max_pieces,
+            drawness_game_level=args.drawness_game_level,
         )
 
     elif args.chunk_idx is not None:
@@ -1031,6 +1079,7 @@ Modes
             drawness_min_ply=args.drawness_min_ply,
             drawness_target=args.drawness_target,
             drawness_max_pieces=args.drawness_max_pieces,
+            drawness_game_level=args.drawness_game_level,
         )
 
 

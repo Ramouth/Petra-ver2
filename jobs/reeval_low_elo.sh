@@ -40,11 +40,15 @@ source "${HOME_DIR}/petra-env/bin/activate"
 module load gcc/13.4.0-binutils-2.44
 
 python3 -u "${SRC}/reeval_stockfish.py" \
-    --dataset     "${IN_FILE}" \
-    --stockfish   "${HOME_DIR}/bin/stockfish" \
-    --depth       18 \
-    --workers     16 \
-    --out         "${OUT_FILE}"
+    --dataset                      "${IN_FILE}" \
+    --stockfish                    "${HOME_DIR}/bin/stockfish" \
+    --depth                        18 \
+    --workers                      16 \
+    --out                          "${OUT_FILE}" \
+    --derive-drawness-from-outcome \
+    --drawness-game-level \
+    --drawness-sf-threshold        0.11 \
+    --drawness-target              0.8
 
 echo
 echo "Done. Dataset: ${OUT_FILE}"

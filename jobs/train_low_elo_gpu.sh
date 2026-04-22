@@ -55,6 +55,7 @@ python3 -u "${SRC}/train.py" \
     --init-model   "${INIT_MODEL}" \
     --out          "${OUT_DIR}" \
     --rank-reg     0.1 \
+    --draw-reg     0.005 \
     --weight-decay 5e-4 \
     --lr           3e-4 \
     --epochs       30 \
