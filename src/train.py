@@ -586,7 +586,7 @@ def train(dataset_path: str = None,
         if anchor_dataset:
             data = mix_anchor(data, anchor_dataset, anchor_frac)
 
-    def _make_loader(data, split, shuffle):
+    def _make_loader(data, split, shuffle, force_visit_dists=False):
         d = data[split]
         has_batch_vd = ("visit_dists" in d) or ("anchor_visit_dists" in d)
         split_drawness_mask, split_drawness_targets, split_drawness_available = _drawness_fields(d)
@@ -609,6 +609,11 @@ def train(dataset_path: str = None,
                 if anchor_rows.any():
                     anchor_local = idxs[anchor_rows] - d["anchor_offset"]
                     visit_dists[anchor_rows] = d["anchor_visit_dists"][anchor_local]
+            elif force_visit_dists:
+                # Val split: train has anchor_visit_dists so has_stored_vd=True,
+                # but val is pure primary with no stored visit_dists. Produce
+                # one-hot so batch shape matches what run_epoch expects.
+                visit_dists = F.one_hot(move_idxs, 4096).float()
             else:
                 visit_dists = None
 
@@ -640,7 +645,8 @@ def train(dataset_path: str = None,
         return loader, has_batch_vd
 
     train_loader, has_stored_vd = _make_loader(data, "train", shuffle=True)
-    val_loader, _               = _make_loader(data, "val",   shuffle=False)
+    val_loader, _               = _make_loader(data, "val",   shuffle=False,
+                                               force_visit_dists=has_stored_vd)
 
     model = PetraNet().to(device)
     if init_model:
