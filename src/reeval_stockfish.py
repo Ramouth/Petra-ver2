@@ -257,6 +257,18 @@ def _load_and_sample(dataset_path: str, n: int, seed: int):
     all_fens    = train_d["fens"] + val_d["fens"]
     all_moves   = torch.cat([train_d["move_idxs"], val_d["move_idxs"]], dim=0)
 
+    def _cat_optional(name):
+        if name in train_d and name in val_d:
+            return torch.cat([train_d[name], val_d[name]], dim=0)
+        return None
+
+    all_outcome_values = _cat_optional("outcome_values")
+    all_game_ids       = _cat_optional("game_ids")
+    all_plys           = _cat_optional("plys")
+    all_drawness_mask  = _cat_optional("drawness_mask")
+    all_drawness_targets = _cat_optional("drawness_targets")
+    all_drawness_available = _cat_optional("drawness_available")
+
     has_vd = "visit_dists" in train_d
     if has_vd:
         all_visit_dists = torch.cat([train_d["visit_dists"], val_d["visit_dists"]], dim=0)
@@ -275,6 +287,18 @@ def _load_and_sample(dataset_path: str, n: int, seed: int):
         all_moves    = all_moves[sampled_idxs]
         if all_visit_dists is not None:
             all_visit_dists = all_visit_dists[sampled_idxs]
+        if all_outcome_values is not None:
+            all_outcome_values = all_outcome_values[sampled_idxs]
+        if all_game_ids is not None:
+            all_game_ids = all_game_ids[sampled_idxs]
+        if all_plys is not None:
+            all_plys = all_plys[sampled_idxs]
+        if all_drawness_mask is not None:
+            all_drawness_mask = all_drawness_mask[sampled_idxs]
+        if all_drawness_targets is not None:
+            all_drawness_targets = all_drawness_targets[sampled_idxs]
+        if all_drawness_available is not None:
+            all_drawness_available = all_drawness_available[sampled_idxs]
     else:
         sampled_idxs = list(range(total))
 
@@ -284,6 +308,12 @@ def _load_and_sample(dataset_path: str, n: int, seed: int):
         "all_tensors":    all_tensors,
         "all_moves":      all_moves,
         "all_visit_dists": all_visit_dists,
+        "all_outcome_values": all_outcome_values,
+        "all_game_ids":   all_game_ids,
+        "all_plys":       all_plys,
+        "all_drawness_mask": all_drawness_mask,
+        "all_drawness_targets": all_drawness_targets,
+        "all_drawness_available": all_drawness_available,
         "n_train_orig":   n_train_orig,
         "has_vd":         has_vd,
     }
@@ -363,6 +393,11 @@ def _apply_filter_and_save(
         out_path: str,
         min_decisive: float,
         max_pieces: int,
+        derive_drawness_from_outcome: bool = False,
+        drawness_sf_threshold: float = 0.15,
+        drawness_min_ply: int = 40,
+        drawness_target: float = 0.7,
+        drawness_max_pieces: int = 32,
         extra_meta: dict = None,
 ):
     """
@@ -373,6 +408,12 @@ def _apply_filter_and_save(
     all_tensors     = dataset_state["all_tensors"]
     all_moves_orig  = dataset_state["all_moves"]      # human-move fallback
     all_visit_dists = dataset_state["all_visit_dists"]
+    all_outcome_values = dataset_state["all_outcome_values"]
+    all_game_ids    = dataset_state["all_game_ids"]
+    all_plys        = dataset_state["all_plys"]
+    all_drawness_mask = dataset_state["all_drawness_mask"]
+    all_drawness_targets = dataset_state["all_drawness_targets"]
+    all_drawness_available = dataset_state["all_drawness_available"]
     sampled_idxs    = dataset_state["sampled_idxs"]
     n_train_orig    = dataset_state["n_train_orig"]
     has_vd          = dataset_state["has_vd"]
@@ -400,6 +441,18 @@ def _apply_filter_and_save(
         sampled_idxs    = [sampled_idxs[i] for i in keep_valid.tolist()]
         if all_visit_dists is not None:
             all_visit_dists = all_visit_dists[keep_valid]
+        if all_outcome_values is not None:
+            all_outcome_values = all_outcome_values[keep_valid]
+        if all_game_ids is not None:
+            all_game_ids = all_game_ids[keep_valid]
+        if all_plys is not None:
+            all_plys = all_plys[keep_valid]
+        if all_drawness_mask is not None:
+            all_drawness_mask = all_drawness_mask[keep_valid]
+        if all_drawness_targets is not None:
+            all_drawness_targets = all_drawness_targets[keep_valid]
+        if all_drawness_available is not None:
+            all_drawness_available = all_drawness_available[keep_valid]
         valid_mask = valid_mask[keep_valid]   # now all True
 
     # All remaining rows have valid evaluations and masks.
@@ -454,11 +507,71 @@ def _apply_filter_and_save(
         sampled_idxs     = [sampled_idxs[i] for i in keep]
         if all_visit_dists is not None:
             all_visit_dists = all_visit_dists[keep_t]
+        if all_outcome_values is not None:
+            all_outcome_values = all_outcome_values[keep_t]
+        if all_game_ids is not None:
+            all_game_ids = all_game_ids[keep_t]
+        if all_plys is not None:
+            all_plys = all_plys[keep_t]
+        if all_drawness_mask is not None:
+            all_drawness_mask = all_drawness_mask[keep_t]
+        if all_drawness_targets is not None:
+            all_drawness_targets = all_drawness_targets[keep_t]
+        if all_drawness_available is not None:
+            all_drawness_available = all_drawness_available[keep_t]
         has_masks = valid_mask.all().item()
 
         filtered_vals = new_values.numpy()
         print(f"  Post-filter decisive rate: "
               f"{(np.abs(filtered_vals) > 0.5).mean()*100:.1f}%")
+
+    n = len(all_fens)
+    if all_drawness_mask is None:
+        all_drawness_mask = torch.zeros(n, dtype=torch.bool)
+    else:
+        all_drawness_mask = all_drawness_mask.bool()
+    if all_drawness_targets is None:
+        all_drawness_targets = torch.zeros(n, dtype=torch.float32)
+    else:
+        all_drawness_targets = all_drawness_targets.float()
+    if all_drawness_available is None:
+        has_existing_drawness = "all_drawness_mask" in dataset_state and dataset_state["all_drawness_mask"] is not None
+        all_drawness_available = torch.full((n,), has_existing_drawness, dtype=torch.bool)
+    else:
+        all_drawness_available = all_drawness_available.bool()
+
+    n_drawness_from_outcome = 0
+    if derive_drawness_from_outcome:
+        if all_outcome_values is None or all_plys is None:
+            raise ValueError(
+                "--derive-drawness-from-outcome requires input datasets parsed "
+                "with outcome_values and plys. Re-parse the PGN with the updated data.py."
+            )
+
+        candidate = (
+            (all_outcome_values.float().abs() < 1e-4) &
+            (new_values.float().abs() < drawness_sf_threshold) &
+            (all_plys.long() >= drawness_min_ply)
+        )
+        if drawness_max_pieces < 32:
+            piece_ok = torch.tensor([
+                bin(int(chess.Board(fen).occupied)).count("1") <= drawness_max_pieces
+                for fen in all_fens
+            ], dtype=torch.bool)
+            candidate &= piece_ok
+
+        n_drawness_from_outcome = int(candidate.sum().item())
+        all_drawness_mask = all_drawness_mask | candidate
+        all_drawness_targets[candidate] = torch.maximum(
+            all_drawness_targets[candidate],
+            torch.full((n_drawness_from_outcome,), drawness_target, dtype=torch.float32),
+        )
+        all_drawness_available = torch.ones(n, dtype=torch.bool)
+
+        print(f"\nDrawness derived from drawn games:")
+        print(f"  outcome draw & |SF|<{drawness_sf_threshold} & ply>={drawness_min_ply}"
+              f" & pieces<={drawness_max_pieces}")
+        print(f"  positives: {n_drawness_from_outcome:,} / {n:,}  target={drawness_target:.2f}")
 
     # Restore train/val split
     train_idxs = [i for i, orig in enumerate(sampled_idxs) if orig < n_train_orig]
@@ -474,7 +587,16 @@ def _apply_filter_and_save(
             "values":    new_values[subset_idxs],
             "move_idxs": final_move_idxs[subset_idxs],
             "fens":      [all_fens[i] for i in subset_idxs],
+            "drawness_mask": all_drawness_mask[subset_idxs],
+            "drawness_targets": all_drawness_targets[subset_idxs],
+            "drawness_available": all_drawness_available[subset_idxs],
         }
+        if all_outcome_values is not None:
+            d["outcome_values"] = all_outcome_values[subset_idxs]
+        if all_game_ids is not None:
+            d["game_ids"] = all_game_ids[subset_idxs]
+        if all_plys is not None:
+            d["plys"] = all_plys[subset_idxs]
         if all_visit_dists is not None:
             d["visit_dists"] = all_visit_dists[subset_idxs]
         if has_masks:
@@ -486,7 +608,16 @@ def _apply_filter_and_save(
         "n_val":           len(val_idxs),
         "label_type":      "stockfish_tanh_cp400",
         "has_visit_dists": has_vd,
+        "drawness_from_outcome": derive_drawness_from_outcome,
+        "n_drawness_from_outcome": n_drawness_from_outcome,
     }
+    if derive_drawness_from_outcome:
+        meta.update({
+            "drawness_sf_threshold": drawness_sf_threshold,
+            "drawness_min_ply": drawness_min_ply,
+            "drawness_target": drawness_target,
+            "drawness_max_pieces": drawness_max_pieces,
+        })
     if extra_meta:
         meta.update(extra_meta)
 
@@ -580,7 +711,12 @@ def merge_partials(dataset_path: str,
                    min_decisive: float = 0.0,
                    max_pieces: int = 32,
                    n: int = 200_000,
-                   seed: int = 42):
+                   seed: int = 42,
+                   derive_drawness_from_outcome: bool = False,
+                   drawness_sf_threshold: float = 0.15,
+                   drawness_min_ply: int = 40,
+                   drawness_target: float = 0.7,
+                   drawness_max_pieces: int = 32):
     """
     Merge chunk partial files into a final dataset.
 
@@ -692,6 +828,11 @@ def merge_partials(dataset_path: str,
         out_path=out_path,
         min_decisive=min_decisive,
         max_pieces=max_pieces,
+        derive_drawness_from_outcome=derive_drawness_from_outcome,
+        drawness_sf_threshold=drawness_sf_threshold,
+        drawness_min_ply=drawness_min_ply,
+        drawness_target=drawness_target,
+        drawness_max_pieces=drawness_max_pieces,
         extra_meta={"source": dataset_path, "stockfish_depth": partials[0]["depth"]},
     )
 
@@ -708,7 +849,12 @@ def reeval(dataset_path: str,
            seed: int = 42,
            workers: int = 1,
            min_decisive: float = 0.0,
-           max_pieces: int = 32):
+           max_pieces: int = 32,
+           derive_drawness_from_outcome: bool = False,
+           drawness_sf_threshold: float = 0.15,
+           drawness_min_ply: int = 40,
+           drawness_target: float = 0.7,
+           drawness_max_pieces: int = 32):
     """
     Load dataset, re-evaluate all positions in one job, save new dataset.
 
@@ -741,6 +887,11 @@ def reeval(dataset_path: str,
         out_path=out_path,
         min_decisive=min_decisive,
         max_pieces=max_pieces,
+        derive_drawness_from_outcome=derive_drawness_from_outcome,
+        drawness_sf_threshold=drawness_sf_threshold,
+        drawness_min_ply=drawness_min_ply,
+        drawness_target=drawness_target,
+        drawness_max_pieces=drawness_max_pieces,
         extra_meta={"source": dataset_path, "stockfish_depth": depth},
     )
 
@@ -790,6 +941,23 @@ Modes
                     help="Keep only |tanh(eval)| >= this. 0.0 = keep all (default).")
     ap.add_argument("--max-pieces",   type=int,   default=32,
                     help="Keep only positions with <= this many pieces (default: 32).")
+    ap.add_argument("--derive-drawness-from-outcome", action="store_true",
+                    help="After SF re-eval, mark drawn-game positions as soft "
+                         "drawness positives when outcome_values==0, |SF eval| "
+                         "is small, and ply is late enough. Requires datasets "
+                         "parsed with outcome_values and plys.")
+    ap.add_argument("--drawness-sf-threshold", type=float, default=0.15,
+                    help="SF value threshold for drawn-game drawness positives "
+                         "(default: 0.15).")
+    ap.add_argument("--drawness-min-ply", type=int, default=40,
+                    help="Minimum half-move index for drawn-game drawness positives "
+                         "(default: 40).")
+    ap.add_argument("--drawness-target", type=float, default=0.7,
+                    help="Soft drawness target assigned to drawn-game positives "
+                         "(default: 0.7).")
+    ap.add_argument("--drawness-max-pieces", type=int, default=32,
+                    help="Optional piece-count cap for drawn-game drawness positives "
+                         "(default: 32 = no extra cap).")
 
     # Chunked mode
     ap.add_argument("--chunk-idx",   type=int, default=None,
@@ -821,6 +989,11 @@ Modes
             max_pieces=args.max_pieces,
             n=args.n,
             seed=args.seed,
+            derive_drawness_from_outcome=args.derive_drawness_from_outcome,
+            drawness_sf_threshold=args.drawness_sf_threshold,
+            drawness_min_ply=args.drawness_min_ply,
+            drawness_target=args.drawness_target,
+            drawness_max_pieces=args.drawness_max_pieces,
         )
 
     elif args.chunk_idx is not None:
@@ -853,6 +1026,11 @@ Modes
             workers=args.workers,
             min_decisive=args.min_decisive,
             max_pieces=args.max_pieces,
+            derive_drawness_from_outcome=args.derive_drawness_from_outcome,
+            drawness_sf_threshold=args.drawness_sf_threshold,
+            drawness_min_ply=args.drawness_min_ply,
+            drawness_target=args.drawness_target,
+            drawness_max_pieces=args.drawness_max_pieces,
         )
 
 

@@ -501,18 +501,28 @@ def split_and_save(dataset: RawDataset,
     val_values      = dataset.values[val_mask]
     train_moveidxs  = dataset.move_idxs[train_mask]
     val_moveidxs    = dataset.move_idxs[val_mask]
+    train_game_ids  = dataset.game_ids[train_mask]
+    val_game_ids    = dataset.game_ids[val_mask]
+    train_plys      = dataset.plys[train_mask]
+    val_plys        = dataset.plys[val_mask]
 
     data = {
         "train": {
             "tensors":   torch.from_numpy(train_tensors),
             "values":    torch.from_numpy(train_values),
+            "outcome_values": torch.from_numpy(train_values.copy()),
             "move_idxs": torch.from_numpy(train_moveidxs).long(),
+            "game_ids":  torch.from_numpy(train_game_ids).long(),
+            "plys":      torch.from_numpy(train_plys).long(),
             "fens":      train_fens,
         },
         "val": {
             "tensors":   torch.from_numpy(val_tensors),
             "values":    torch.from_numpy(val_values),
+            "outcome_values": torch.from_numpy(val_values.copy()),
             "move_idxs": torch.from_numpy(val_moveidxs).long(),
+            "game_ids":  torch.from_numpy(val_game_ids).long(),
+            "plys":      torch.from_numpy(val_plys).long(),
             "fens":      val_fens,
         },
         "meta": {

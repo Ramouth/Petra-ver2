@@ -894,6 +894,80 @@ previous heuristic (`is_anchor & |v| < 0.15` as positives, `|v| > 0.5` as
 negatives), but new runs should use explicit masks. This prevents the critical
 failure mode where balanced Lichess positions are mislabeled as theoretical draws.
 
+**Implementation update (2026-04-22): drawn-game soft drawness prior**
+
+The PGN → SF re-eval pipeline now preserves the original game outcome and ply:
+
+- `data.py` saves `outcome_values`, `game_ids`, and `plys` in train/val splits
+- `reeval_stockfish.py` carries those fields through sampling, filtering, chunk
+  merge, and final dataset packing
+
+This allows SF-relabelled real-game datasets to derive soft drawness labels from
+drawn games:
+
+```bash
+python3 src/reeval_stockfish.py \
+  --dataset dataset_raw.pt \
+  --out dataset_sf_drawness.pt \
+  --derive-drawness-from-outcome \
+  --drawness-sf-threshold 0.15 \
+  --drawness-min-ply 40 \
+  --drawness-target 0.7
+```
+
+Rule:
+
+```
+game outcome is draw
+AND |SF_value| < threshold
+AND ply >= min_ply
+AND optional piece_count <= drawness_max_pieces
+→ drawness_target = soft target, default 0.7
+```
+
+These are **not** treated as theoretical draws. They are lower-confidence
+distribution-broadening positives. Clean endgame/tablebase positions remain the
+high-confidence drawness source (`target=1.0`). Early equal middlegames from drawn
+games remain dangerous; the ply gate and soft target are what keep this signal
+from becoming "balanced = drawn."
+
+Operational consequence: already SF-relabelled datasets that do not contain
+`outcome_values` and `plys` cannot derive this signal. They must be re-parsed
+with the updated `data.py`, then re-evaluated with Stockfish using the flags
+above. If an existing raw parsed dataset already has those fields, only re-eval
+is required.
+
+Current job setup:
+
+1. Regular broad training can start immediately from the ready SF dataset:
+
+   ```bash
+   bsub -env "DATASET=/path/to/full_sf.pt,INIT_MODEL=/path/to/start/best.pt,OUT_DIR=/path/to/models/full_regular" \
+     < jobs/train_full_regular_gpu.sh
+   ```
+
+2. In parallel, re-parse the PGN source with metadata:
+
+   ```bash
+   bsub -env "YEAR=2025,MONTH=01,MAX_GAMES=150000" \
+     < jobs/parse_drawness_source.sh
+   ```
+
+3. Re-evaluate the metadata-preserving dataset in chunks:
+
+   ```bash
+   bsub -env "YEAR=2025,MONTH=01,CHUNK_IDX=0" < jobs/reeval_drawness_depth18.sh
+   # repeat CHUNK_IDX until all chunks are done
+   bsub -env "YEAR=2025,MONTH=01" < jobs/reeval_drawness_merge.sh
+   ```
+
+4. Fine-tune from the regular checkpoint with low drawness pressure:
+
+   ```bash
+   bsub -env "DATASET=/path/to/full_sf_drawness.pt,INIT_MODEL=/path/to/models/full_regular/best.pt" \
+     < jobs/train_full_drawness_finetune_gpu.sh
+   ```
+
 **Training schedule: bootstrap → broaden → refresh**
 
 Drawness should be bootstrapped before broad training, then periodically refreshed:
