@@ -164,6 +164,36 @@ def _ensure_visit_dists(d: dict) -> torch.Tensor:
     return vd
 
 
+def _drawness_fields(d: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Return (drawness_mask, drawness_targets, drawness_available).
+
+    drawness_mask marks rows where the drawness target is semantically valid.
+    drawness_targets is 1.0 for structural draws and 0.0 for supervised
+    non-draws. Balanced positions should have mask=False. drawness_available
+    marks rows from a dataset that intentionally supplied drawness supervision,
+    so older anchor heuristics are not applied to explicitly unsupervised rows.
+    """
+    n = len(d["tensors"])
+    mask = d.get("drawness_mask")
+    targets = d.get("drawness_targets")
+    available = d.get("drawness_available")
+    if mask is None:
+        mask = torch.zeros(n, dtype=torch.bool)
+    else:
+        mask = mask.bool()
+    if targets is None:
+        targets = torch.zeros(n, dtype=torch.float32)
+    else:
+        targets = targets.float()
+    if available is None:
+        available = torch.full((n,), "drawness_mask" in d and "drawness_targets" in d,
+                               dtype=torch.bool)
+    else:
+        available = available.bool()
+    return mask, targets, available
+
+
 def merge_datasets(primary_data: dict, extra_path: str) -> dict:
     """
     Merge a second full dataset into the primary for training.
@@ -180,12 +210,17 @@ def merge_datasets(primary_data: dict, extra_path: str) -> dict:
     extra = torch.load(extra_path, map_location="cpu", weights_only=False)
 
     def _cat_split(a: dict, b: dict) -> dict:
+        a_draw_mask, a_draw_targets, a_draw_available = _drawness_fields(a)
+        b_draw_mask, b_draw_targets, b_draw_available = _drawness_fields(b)
         merged = {
             "tensors":   torch.cat([a["tensors"],   b["tensors"]]),
             "values":    torch.cat([a["values"],     b["values"]]),
             "move_idxs": torch.cat([a["move_idxs"],  b["move_idxs"]]),
             "visit_dists": torch.cat([_ensure_visit_dists(a),
                                       _ensure_visit_dists(b)]),
+            "drawness_mask": torch.cat([a_draw_mask, b_draw_mask]),
+            "drawness_targets": torch.cat([a_draw_targets, b_draw_targets]),
+            "drawness_available": torch.cat([a_draw_available, b_draw_available]),
         }
         if "legal_masks" in a or "legal_masks" in b:
             # If one side is missing masks, substitute all-ones (0xFF = all bits
@@ -228,6 +263,10 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
 
     idx = torch.randperm(n_anchor)[:n_sample]
     a   = anchor["train"]
+    a_draw_mask, a_draw_targets, a_draw_available = _drawness_fields(a)
+    primary_draw_mask, primary_draw_targets, primary_draw_available = _drawness_fields(
+        primary_data["train"]
+    )
 
     # Use anchor's precomputed visit_dists when available (e.g. endgame anchors
     # have uniform distributions over legal moves — use them as-is).
@@ -246,6 +285,9 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
         "tensors":     torch.cat([primary_data["train"]["tensors"],   a["tensors"][idx]]),
         "values":      torch.cat([primary_data["train"]["values"],    a["values"][idx]]),
         "move_idxs":   torch.cat([primary_data["train"]["move_idxs"], a["move_idxs"][idx]]),
+        "drawness_mask": torch.cat([primary_draw_mask, a_draw_mask[idx]]),
+        "drawness_targets": torch.cat([primary_draw_targets, a_draw_targets[idx]]),
+        "drawness_available": torch.cat([primary_draw_available, a_draw_available[idx]]),
     }
     if "visit_dists" in primary_data["train"]:
         mixed["visit_dists"] = torch.cat([primary_data["train"]["visit_dists"], vd])
@@ -270,8 +312,8 @@ def mix_anchor(primary_data: dict, anchor_path: str, anchor_frac: float) -> dict
         mixed["legal_masks"] = torch.cat([primary_masks, anchor_masks])
 
     # Track which positions came from the structural draw anchor pool.
-    # Used by the drawness head loss: anchor positions with value ≈ 0 are
-    # structural draws (positives); decisive positions anywhere are negatives.
+    # Kept for backward compatibility with older anchors that lack explicit
+    # drawness_mask/drawness_targets fields.
     mixed["is_anchor"] = torch.cat([
         torch.zeros(n_primary, dtype=torch.bool),
         torch.ones(n_sample,  dtype=torch.bool),
@@ -320,23 +362,21 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for batch in loader:
-            # Batch layout — is_anchor is always the last element:
-            #   dense+vd, no masks:  (tensors, values, move_idxs, visit_dists, is_anchor)              5
-            #   dense+vd, masks:     (tensors, values, move_idxs, visit_dists, packed_masks, is_anchor) 6
-            #   dense+no-vd, no masks: (tensors, values, move_idxs, is_anchor)                         4
-            #   dense+no-vd, masks:    (tensors, values, move_idxs, packed_masks, is_anchor)            5
+            # Batch layout — drawness_mask, drawness_targets,
+            # drawness_available, is_anchor are always the final elements.
+            *core, drawness_mask, drawness_targets, drawness_available, is_anchor = batch
             if dense_policy and has_stored_vd:
-                if len(batch) == 6:
-                    tensors, values, move_idxs, visit_dists, packed_masks, is_anchor = batch
-                else:  # 5
-                    tensors, values, move_idxs, visit_dists, is_anchor = batch
+                if len(core) == 5:
+                    tensors, values, move_idxs, visit_dists, packed_masks = core
+                else:  # 4
+                    tensors, values, move_idxs, visit_dists = core
                     packed_masks = None
                 visit_dists = visit_dists.to(device)
             else:
-                if len(batch) == 5:
-                    tensors, values, move_idxs, packed_masks, is_anchor = batch
-                else:  # 4
-                    tensors, values, move_idxs, is_anchor = batch
+                if len(core) == 4:
+                    tensors, values, move_idxs, packed_masks = core
+                else:  # 3
+                    tensors, values, move_idxs = core
                     packed_masks = None
 
             # Unpack legal masks per batch
@@ -352,6 +392,9 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             tensors   = tensors.float().to(device)   # uint8 → float32
             values    = values.to(device)
             move_idxs = move_idxs.to(device)
+            drawness_mask = drawness_mask.to(device)
+            drawness_targets = drawness_targets.to(device)
+            drawness_available = drawness_available.to(device)
 
             # For SF supervised data without stored visit_dists, build one-hot per batch.
             # This avoids materialising a (N, 4096) float32 tensor at load time
@@ -405,19 +448,35 @@ def run_epoch(model, loader, optimizer, is_train: bool, dense_policy: bool = Fal
             else:
                 rloss = torch.zeros(1, device=device)
 
-            # Drawness loss — BCE on structural draw positions.
-            # Positives: anchor positions with value ≈ 0.0 (endgame pool draws)
-            # Negatives: decisive positions (|v| > 0.5) from anywhere
-            # Balanced middlegames (|v| ≤ 0.5, non-anchor) are skipped — ambiguous.
+            # Drawness loss — BCE for rows with explicit drawness supervision.
+            # drawness_mask/targets are preferred: structural draw sources are
+            # positives, known decisive/non-draw sources are negatives, and
+            # balanced middlegames are left unsupervised.
+            #
+            # Backward compatibility: older anchor datasets do not have explicit
+            # fields, so anchor rows with |v| < 0.15 are inferred as structural
+            # positives. Decisive positions (|v| > 0.5) are always valid
+            # negatives because a decisive position is not structurally drawn.
             if draw_reg > 0 and g is not None:
                 is_anchor_dev = is_anchor.to(device)
                 d_pred    = model.drawness_fwd(g)
-                draw_pos  = is_anchor_dev & (values.abs() < 0.1)
-                draw_neg  = values.abs() > 0.5
-                draw_mask = draw_pos | draw_neg
+                has_explicit = drawness_available.any()
+                inferred_pos = is_anchor_dev & (values.abs() < 0.15)
+                draw_neg     = values.abs() > 0.5
+                draw_mask    = drawness_mask | draw_neg
+                draw_targets_full = torch.zeros_like(values)
+
+                if has_explicit:
+                    draw_targets_full[drawness_mask] = drawness_targets[drawness_mask]
+                else:
+                    draw_mask = inferred_pos | draw_neg
+                    draw_targets_full[inferred_pos] = 1.0
+
                 if draw_mask.sum() >= 4:
-                    draw_targets = draw_pos[draw_mask].float()
-                    dloss = F.binary_cross_entropy(d_pred[draw_mask], draw_targets)
+                    dloss = F.binary_cross_entropy(
+                        d_pred[draw_mask],
+                        draw_targets_full[draw_mask],
+                    )
                     loss  = loss + draw_reg * dloss
                 else:
                     dloss = torch.zeros(1, device=device)
@@ -505,7 +564,9 @@ def train(dataset_path: str = None,
     def _fresh_endgame_data():
         positions = generate_positions(endgame_positions, include_mirrors=True,
                                        stages=_stages)
-        return _build_eg(positions)
+        # Skip visit_dists when policy is disabled — avoids ~16 GB allocation
+        # for large endgame bootstraps where visit_dists would never be used.
+        return _build_eg(positions, store_visit_dists=(policy_weight > 0))
 
     regenerate = endgame_positions > 0
 
@@ -527,6 +588,7 @@ def train(dataset_path: str = None,
     def _make_loader(data, split, shuffle):
         d = data[split]
         has_batch_vd = ("visit_dists" in d) or ("anchor_visit_dists" in d)
+        split_drawness_mask, split_drawness_targets, split_drawness_available = _drawness_fields(d)
 
         def _collate(batch):
             idxs = torch.tensor([row[0] for row in batch], dtype=torch.long)
@@ -561,6 +623,9 @@ def train(dataset_path: str = None,
                 out.append(visit_dists)
             if packed_masks is not None:
                 out.append(packed_masks)
+            out.append(split_drawness_mask[idxs])
+            out.append(split_drawness_targets[idxs])
+            out.append(split_drawness_available[idxs])
             out.append(is_anchor)
             return tuple(out)
 
@@ -623,11 +688,14 @@ def train(dataset_path: str = None,
         print(f"Rank regularisation: λ={rank_reg}  "
               f"(tr(C²) penalty — maximises effective rank)")
     if draw_reg > 0:
-        if not anchor_dataset:
-            print(f"WARNING: --draw-reg set but no --anchor-dataset. "
-                  f"No structural draw positives — drawness loss will only train on negatives.")
+        draw_mask_train, draw_targets_train, _ = _drawness_fields(data["train"])
+        n_draw_pos = int((draw_mask_train & (draw_targets_train > 0.5)).sum())
+        if n_draw_pos == 0 and not anchor_dataset:
+            print(f"WARNING: --draw-reg set but no explicit structural draw positives. "
+                  f"Drawness loss will only train on negatives unless older anchor "
+                  f"heuristics find |v|<0.15 anchor rows.")
         print(f"Drawness regularisation: λ={draw_reg}  "
-              f"(BCE — structural draws from anchor pool vs decisive positions)")
+              f"(BCE — explicit structural draws vs decisive positions)")
     print(f"Geometry patience: {geo_patience} epochs  "
           f"(stops when rank and win·draw cosine both plateau)\n")
     rank_col = f"  {'RankL':>6}" if rank_reg > 0 else ""
@@ -877,8 +945,9 @@ def main():
     ap.add_argument("--draw-reg", type=float, default=0.0,
                     help="Drawness regularisation weight λ (default: 0). "
                          "Trains the auxiliary drawness head with BCE loss. "
-                         "Requires --anchor-dataset: anchor positions with |v|<0.1 "
-                         "are structural draw positives; |v|>0.5 positions are negatives. "
+                         "Uses explicit drawness_mask/drawness_targets when present. "
+                         "Older anchors fall back to anchor positions with |v|<0.15 "
+                         "as structural draw positives; |v|>0.5 positions are negatives. "
                          "Try 0.01–0.05. Balanced middlegames (|v|≤0.5, non-anchor) are "
                          "skipped — they are ambiguous, not draws.")
     args = ap.parse_args()

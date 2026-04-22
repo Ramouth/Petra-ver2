@@ -874,15 +874,75 @@ The `|v| < 0.1` Lichess bucket is balanced, not drawn. Using it as a draw anchor
 trains the model to treat "SF has no strong opinion" as draw-ness. That is wrong and
 is the root cause of the draw dimension never opening cleanly.
 
+**Implementation update (2026-04-22): explicit drawness supervision**
+
+The near-term drawness head is now implemented as an auxiliary
+`Linear(128→1) + sigmoid` head over the geometry bottleneck. Training no longer
+has to infer drawness from `|v| ≈ 0`. Endgame datasets can carry:
+
+- `drawness_targets`: `1.0` for structural draws, `0.0` for known non-draws
+- `drawness_mask`: rows where that target is valid
+- `drawness_available`: marks datasets that intentionally supplied drawness labels
+
+`generate_endgame.py` now emits explicit drawness targets:
+
+- stages `9..11` (`KR vs KR`, `KNN vs K`, `KB vs KB`) → drawness positive
+- stages `1..8` decisive endgames → drawness negative
+
+`train.py` prefers these explicit targets. Older anchors still fall back to the
+previous heuristic (`is_anchor & |v| < 0.15` as positives, `|v| > 0.5` as
+negatives), but new runs should use explicit masks. This prevents the critical
+failure mode where balanced Lichess positions are mislabeled as theoretical draws.
+
+**Training schedule: bootstrap → broaden → refresh**
+
+Drawness should be bootstrapped before broad training, then periodically refreshed:
+
+1. **Drawness bootstrap:** train from a competent checkpoint on generated/tablebase
+   endgames with explicit drawness labels. Use structural draw stages as positives
+   and decisive endgames as negatives. Policy can be disabled or downweighted.
+
+   Example:
+
+   ```bash
+   python3 src/train.py \
+     --endgame-positions 250000 \
+     --endgame-stages 1 2 4 5 9 10 11 \
+     --init-model models/feb_sf/best.pt \
+     --draw-reg 0.05 \
+     --rank-reg 0.05 \
+     --policy-weight 0.0 \
+     --epochs 5 \
+     --out models/drawness_bootstrap
+   ```
+
+2. **Broader value/policy training:** switch to Lichess/SF/self-play data, using
+   the bootstrapped model as `--init-model`. Keep a small structural draw anchor
+   or low `--draw-reg` active so the drawness head does not drift while the value
+   and policy geometry broaden.
+
+3. **Drawness refresh:** after each broad phase, run a short endgame refresh
+   with higher drawness weight. This re-anchors "neither side can make progress"
+   without treating every equal middlegame as drawn.
+
+Recommended first-pass cadence:
+
+```
+2-5 epochs drawness bootstrap
+5-10 epochs broad SF/Lichess training with low drawness anchor
+1-2 epochs drawness refresh
+repeat
+```
+
+The drawness head replaces the old draw-perpendicular loss as the primary
+anti-collapse mechanism. `L_draw = λ cos²(c_draw, axis)` remains a historical
+experiment: useful as an anti-collapse probe, but it creates a fake single draw
+axis if used as the main supervision.
+
 **Decision path:**
 
-1. **Near term:** Keep scalar value head. Add an **auxiliary drawness head** — a
-   separate `Linear(128→1) + sigmoid` trained with BCE on structural draw sources
-   (endgame pool as positives, decisive positions as negatives). The drawness head
-   creates gradient pressure in the geometry space without changing the value signal.
-   The draw perp loss `L_draw = λ cos²(c_draw, axis)` is a temporary anti-collapse
-   regularizer only — it prevents midpoint collapse but creates a fake single draw
-   axis if used alone. Replace it with the drawness head once that is implemented.
+1. **Near term:** Use the implemented auxiliary drawness head with explicit
+   targets and the bootstrap/broaden/refresh curriculum above.
 
 2. **Medium term:** WDL head with game-outcome labels combined with structural draw
    anchors. The q/d decomposition above is the target output. Noisy from blunders

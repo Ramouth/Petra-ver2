@@ -355,7 +355,9 @@ def generate_positions(n: int, include_mirrors: bool = True, stages=None):
     The mirror is the SAME position with piece colors inverted — a true antipodal
     partner that forces win/loss geometric separation.
 
-    Returns list of (board, value) tuples, shuffled.
+    Returns list of (board, value, drawness_target) tuples, shuffled.
+    drawness_target is 1.0 for structural draw stages and 0.0 for decisive
+    stages, so train.py can bootstrap the auxiliary drawness head explicitly.
     """
     if stages is None:
         stages = [1]
@@ -384,11 +386,11 @@ def generate_positions(n: int, include_mirrors: bool = True, stages=None):
 
             if label_type == 'draw':
                 # Drawn endgame: label 0.0 regardless of turn or color.
-                all_positions.append((board, 0.0))
+                all_positions.append((board, 0.0, 1.0))
                 board_btm = board.copy()
                 board_btm.turn = chess.BLACK
                 if board_btm.is_valid() and not board_btm.is_game_over():
-                    all_positions.append((board_btm, 0.0))
+                    all_positions.append((board_btm, 0.0, 1.0))
 
                 if include_mirrors:
                     # For drawn stages, mirror_fn generates a fresh position of the
@@ -397,33 +399,33 @@ def generate_positions(n: int, include_mirrors: bool = True, stages=None):
                     m_fen = mirror.board_fen()
                     if m_fen not in seen_fens:
                         seen_fens.add(m_fen)
-                        all_positions.append((mirror, 0.0))
+                        all_positions.append((mirror, 0.0, 1.0))
                         mirror_btm = mirror.copy()
                         mirror_btm.turn = chess.BLACK
                         if mirror_btm.is_valid() and not mirror_btm.is_game_over():
-                            all_positions.append((mirror_btm, 0.0))
+                            all_positions.append((mirror_btm, 0.0, 1.0))
             else:
                 # Decisive endgame: white wins in pos_fn, black wins in mirror_fn.
                 # White to move: white wins → +1.0
-                all_positions.append((board, +1.0))
+                all_positions.append((board, +1.0, 0.0))
 
                 # Same position, black to move: white still has piece but black to move → -1.0
                 board_btm = board.copy()
                 board_btm.turn = chess.BLACK
                 if board_btm.is_valid() and not board_btm.is_game_over():
-                    all_positions.append((board_btm, -1.0))
+                    all_positions.append((board_btm, -1.0, 0.0))
 
                 if include_mirrors:
                     # Color-swapped antipodal: same squares, piece colors inverted.
                     # White to move but white now has the bare king → white loses → -1.0
                     mirror = _color_swap(board)
                     if mirror is not None:
-                        all_positions.append((mirror, -1.0))
+                        all_positions.append((mirror, -1.0, 0.0))
                         # Black to move with the winning piece → STM (black) wins → +1.0
                         mirror_btm = mirror.copy()
                         mirror_btm.turn = chess.BLACK
                         if mirror_btm.is_valid() and not mirror_btm.is_game_over():
-                            all_positions.append((mirror_btm, +1.0))
+                            all_positions.append((mirror_btm, +1.0, 0.0))
 
             generated += 1
 
@@ -440,6 +442,7 @@ def label_with_stockfish(positions, stockfish_path: str, depth: int = 5):
     Replace rule-based labels with Stockfish evaluations.
     Useful for verification of stages 3–8 where rule labels are approximate.
     Returns list of (board, value) with SF-derived STM-relative values.
+    If positions include a third drawness target, it is preserved.
     """
     import math
     import chess.engine
@@ -447,7 +450,9 @@ def label_with_stockfish(positions, stockfish_path: str, depth: int = 5):
     print(f"  Verifying/re-labelling with Stockfish depth {depth} ...")
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
     result = []
-    for i, (board, _) in enumerate(positions):
+    for i, item in enumerate(positions):
+        board = item[0]
+        drawness_target = item[2] if len(item) >= 3 else None
         info = engine.analyse(board, chess.engine.Limit(depth=depth))
         score = info["score"].white()
         if score.is_mate():
@@ -459,7 +464,10 @@ def label_with_stockfish(positions, stockfish_path: str, depth: int = 5):
         # Convert to STM-relative
         if board.turn == chess.BLACK:
             val = -val
-        result.append((board, val))
+        if drawness_target is None:
+            result.append((board, val))
+        else:
+            result.append((board, val, drawness_target))
         if (i + 1) % 500 == 0:
             print(f"    {i+1}/{len(positions)}")
     engine.quit()
@@ -473,7 +481,8 @@ def label_with_stockfish(positions, stockfish_path: str, depth: int = 5):
 def build_dataset(positions, val_frac: float = 0.1,
                    store_visit_dists: bool = True):
     """
-    Convert list of (board, value) to a train.py-compatible dataset dict.
+    Convert list of (board, value[, drawness_target]) to a train.py-compatible
+    dataset dict.
 
     store_visit_dists=False: skip the 4096-float visit_dists tensor entirely.
     Use this when building a raw intermediate file for SF re-evaluation —
@@ -502,11 +511,21 @@ def build_dataset(positions, val_frac: float = 0.1,
         move_idxs = []
         vds       = [] if store_visit_dists else None
         fens      = []
+        drawness_targets = []
+        drawness_mask    = []
+        drawness_available = []
 
-        for board, value in split:
+        for item in split:
+            board, value = item[0], item[1]
+            has_drawness = len(item) >= 3
+            drawness_target = float(item[2]) if has_drawness else 0.0
+
             tensors.append(board_to_tensor(board))
             values.append(value)
             fens.append(board.fen())
+            drawness_targets.append(drawness_target)
+            drawness_mask.append(has_drawness)
+            drawness_available.append(has_drawness)
 
             flip  = (board.turn == chess.BLACK)
             legal = list(board.legal_moves)
@@ -528,6 +547,9 @@ def build_dataset(positions, val_frac: float = 0.1,
             "values":    torch.tensor(values, dtype=torch.float32),
             "move_idxs": torch.tensor(move_idxs, dtype=torch.int64),
             "fens":      fens,
+            "drawness_targets": torch.tensor(drawness_targets, dtype=torch.float32),
+            "drawness_mask":    torch.tensor(drawness_mask, dtype=torch.bool),
+            "drawness_available": torch.tensor(drawness_available, dtype=torch.bool),
         }
         if store_visit_dists:
             split_data["visit_dists"] = torch.stack(vds)
@@ -538,6 +560,10 @@ def build_dataset(positions, val_frac: float = 0.1,
     pos_values = data["train"]["values"]
     wins       = (pos_values >  0.5).sum().item()
     losses     = (pos_values < -0.5).sum().item()
+    draw_mask  = data["train"]["drawness_mask"]
+    draw_tgt   = data["train"]["drawness_targets"]
+    draw_pos   = (draw_mask & (draw_tgt > 0.5)).sum().item()
+    draw_neg   = (draw_mask & (draw_tgt <= 0.5)).sum().item()
 
     data["meta"] = {
         "source":     "endgame",
@@ -547,12 +573,15 @@ def build_dataset(positions, val_frac: float = 0.1,
         "label_std":  float(pos_values.std()),
         "pct_win":    wins   / n_train,
         "pct_loss":   losses / n_train,
+        "n_drawness_pos": int(draw_pos),
+        "n_drawness_neg": int(draw_neg),
     }
 
     print(f"  train: {n_train:,}  val: {n_val_act:,}")
     print(f"  labels — win: {wins/n_train*100:.1f}%  "
           f"loss: {losses/n_train*100:.1f}%  "
           f"mean: {float(pos_values.mean()):+.3f}")
+    print(f"  drawness — pos: {draw_pos:,}  neg: {draw_neg:,}")
 
     return data
 
