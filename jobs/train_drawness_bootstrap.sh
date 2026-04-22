@@ -18,24 +18,24 @@ module load cuda/12.1
 # (KR vs KR, KNN vs K, KB vs KB) from decisive unequal positions, using
 # explicit drawness_target labels emitted by generate_endgame.py.
 #
-# Strategy: fine-tune from lichess_2023_03_endgame (rank 21.6, first KR vs KR
-# pass) on a
-# mixed endgame set — decisive stages 1/2/4/5 as drawness negatives,
-# drawn stages 9/10/11 as drawness positives.  policy_weight=0 keeps
-# policy head weights frozen (no policy gradient) and also avoids
-# materialising visit_dists tensors (~16 GB), making 250k positions
-# feasible in 8 GB RAM (train.py skips visit_dists when policy_weight=0).
+# Strategy: freeze the backbone and train only the drawness_head (129 params)
+# on frozen geometry from lichess_2023_03_endgame (rank 21.6, first KR vs KR pass).
 #
-# Only 5 epochs to limit geometry regression from value-only endgame training.
-# rank_reg=0.05 resists eigenvalue concentration while the draw dimension opens.
+# Previous attempt (job 28258816) showed the drawness head converges in 1 epoch
+# (gap=+0.956) but rank collapsed 21.6→14.3 due to endgame value gradient reshaping
+# the geometry.  --freeze-backbone eliminates that regression entirely: only the
+# 129-parameter linear head is updated.
+#
+# policy_weight=0 avoids allocating visit_dists (~16 GB) for positions that will
+# never use them (train.py skips storage when policy_weight=0).
 #
 # Success gate (run probe_geometry.sh after training):
 #   - drawness sanity: KR vs KR > 0.7, Sicilian < 0.3
-#   - Effective rank not lower than feb_sf baseline (18.9) by more than 3
-#   - All value sign checks pass
+#   - Effective rank unchanged from init (21.6) — guaranteed by frozen backbone
+#   - All value sign checks pass (value head frozen, should be identical)
 #
-# After this job: run train_post_bootstrap.sh (broad SF/Lichess with low
-# draw-reg anchor) to restore policy and broaden the geometry.
+# After this job: run broad SF/Lichess training with --init-model pointing here
+# and a small --draw-reg to keep the drawness head anchored as geometry broadens.
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --endgame-positions 250000 \
@@ -43,7 +43,7 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --init-model   /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03_endgame/best.pt \
     --out          /zhome/81/b/206091/Petra-ver2/models/drawness_bootstrap \
     --draw-reg     0.05 \
-    --rank-reg     0.05 \
     --policy-weight 0.0 \
-    --epochs       5 \
-    --geo-patience 5
+    --freeze-backbone \
+    --epochs       2 \
+    --geo-patience 2

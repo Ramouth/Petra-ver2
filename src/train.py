@@ -544,7 +544,8 @@ def train(dataset_path: str = None,
           num_workers: int = 0,
           deterministic: bool = False,
           rank_reg: float = 0.0,
-          draw_reg: float = 0.0):
+          draw_reg: float = 0.0,
+          freeze_backbone: bool = False):
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -653,7 +654,15 @@ def train(dataset_path: str = None,
     n_params = sum(p.numel() for p in model.parameters())
     print(f"PetraNet: {n_params:,} parameters  |  device: {device}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    if freeze_backbone:
+        for name, param in model.named_parameters():
+            if "drawness_head" not in name:
+                param.requires_grad = False
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Backbone frozen — training drawness_head only ({n_trainable} parameters)")
+
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.Adam(trainable, lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=2, factor=0.5, min_lr=1e-5
         # patience=2: LR halves after 2 epochs no improvement
@@ -950,6 +959,10 @@ def main():
                          "as structural draw positives; |v|>0.5 positions are negatives. "
                          "Try 0.01–0.05. Balanced middlegames (|v|≤0.5, non-anchor) are "
                          "skipped — they are ambiguous, not draws.")
+    ap.add_argument("--freeze-backbone", action="store_true",
+                    help="Freeze all parameters except the drawness_head. "
+                         "Use for drawness bootstrap: trains only the 129-parameter "
+                         "linear head on frozen geometry, guaranteeing zero rank regression.")
     args = ap.parse_args()
 
     if args.dataset is None and args.endgame_positions == 0:
@@ -976,6 +989,7 @@ def main():
         deterministic=args.deterministic,
         rank_reg=args.rank_reg,
         draw_reg=args.draw_reg,
+        freeze_backbone=args.freeze_backbone,
     )
 
 
