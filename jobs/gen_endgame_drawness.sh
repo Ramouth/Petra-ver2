@@ -2,7 +2,7 @@
 #BSUB -J gen_endgame_drawness
 #BSUB -q hpc
 #BSUB -n 1
-#BSUB -R "rusage[mem=4GB]"
+#BSUB -R "rusage[mem=8GB]"
 #BSUB -W 0:30
 #BSUB -o /zhome/81/b/206091/logs/gen_endgame_drawness_%J.out
 #BSUB -e /zhome/81/b/206091/logs/gen_endgame_drawness_%J.err
