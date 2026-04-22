@@ -3,17 +3,20 @@
 #BSUB -q hpc
 #BSUB -n 16
 #BSUB -R "rusage[mem=1GB] select[hname!='n-62-21-89']"
-#BSUB -W 12:00
+#BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/reeval_low_elo_%J.out
 #BSUB -e /zhome/81/b/206091/logs/reeval_low_elo_%J.err
 
 # SF depth-18 re-evaluation of the low-ELO (1600-1850) dataset.
 #
-# The dataset is ~100k games × 20 positions = ~2M positions, which fits in
-# a single chunk — no iterative rounds needed.
+# Dataset: ~100k games × 20 positions = ~2M positions.
+# We sample 500k for SF reeval (~5 positions/game, enough for game-level
+# drawness check). Throughput: ~20k pos/h with 16 workers → ~25h → 24h wall.
 #
-# After this job, run reeval_low_elo_merge.sh to produce the final dataset,
-# then train with train_low_elo_gpu.sh.
+# Game-level drawness: a game is marked only if ALL sampled positions had
+# |SF eval| < 0.11. This excludes blunder-to-draw games.
+#
+# After this job, train with train_low_elo_gpu.sh.
 #
 # Submit:
 #   bsub < jobs/reeval_low_elo.sh
@@ -43,6 +46,7 @@ python3 -u "${SRC}/reeval_stockfish.py" \
     --dataset                      "${IN_FILE}" \
     --stockfish                    "${HOME_DIR}/bin/stockfish" \
     --depth                        18 \
+    --n                            500000 \
     --workers                      16 \
     --out                          "${OUT_FILE}" \
     --derive-drawness-from-outcome \
