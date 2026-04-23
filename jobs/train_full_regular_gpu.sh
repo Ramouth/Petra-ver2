@@ -1,7 +1,7 @@
 #!/bin/bash
 #BSUB -J train_full_regular
 #BSUB -q gpuv100
-#BSUB -n 1
+#BSUB -n 4
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -R "rusage[mem=32GB] span[hosts=1]"
 #BSUB -W 24:00
