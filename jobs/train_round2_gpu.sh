@@ -44,7 +44,7 @@ module load cuda/12.1
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --dataset        /zhome/81/b/206091/Petra-ver2/data/dataset_balanced.pt \
     --anchor-dataset /zhome/81/b/206091/Petra-ver2/data/endgame_anchor.pt \
-    --anchor-frac    0.20 \
+    --anchor-frac    0.12 \
     --rank-reg       0.1 \
     --weight-decay   5e-4 \
     --out            /zhome/81/b/206091/Petra-ver2/models/round2
