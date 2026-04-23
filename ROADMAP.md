@@ -1121,6 +1121,101 @@ strategies → architecture is the ceiling.
 
 ---
 
+## Session 12 — Drawness Dataset Rebuild + Round 2 Reeval Done (2026-04-23)
+
+### Round 2 reeval (chunks 4–7) — complete
+
+All four chunks of `dataset_2025_01.pt` at depth 18 finished overnight. Zero human
+move fallbacks across all chunks.
+
+| Chunk | Positions | Wall time |
+|-------|-----------|-----------|
+| 4 | 248,248 | 6.4h |
+| 5 | 248,248 | 6.4h (Signal 15 at end, completed cleanly) |
+| 6 | 248,248 | 6.4h |
+| 7 | 248,248 | 6.4h |
+
+8/12 chunks done. Next: merge (round 2), train, then submit chunks 8–11.
+
+### Low-ELO reeval — complete
+
+`dataset_2025_01_low_elo_sf18.pt` ready. 500k/500k positions at depth 18.
+
+| Metric | Value |
+|--------|-------|
+| Decisive \|v\|>0.5 | 42.1% |
+| Equal \|v\|<0.1 | 22.5% |
+| Game-level drawness positives | 937 / 500,000 (0.19%) |
+| Train / val split | 475,110 / 24,890 |
+
+### Drawness diagnosis — game-level filter too strict
+
+0.19% drawness from the game-level criterion (`max|SF|<0.11 across ALL positions
+in game`) confirms the signal is too sparse to train from. At 1600-1850 ELO, even
+games that end drawn typically have one position where SF sees a decisive advantage
+that the human missed. The filter correctly excludes those — but almost nothing
+passes.
+
+Same sparsity will occur in the main 2025-01 merge: game-level threshold 0.11 is
+simply too strict for human games.
+
+### New plan — position-level drawness pipeline
+
+The existing `parse_drawness_source.sh` → `reeval_drawness_depth18.sh` →
+`reeval_drawness_merge.sh` pipeline uses position-level filtering:
+
+```
+game_outcome = draw
+AND |SF_value| < 0.15
+AND ply >= 40
+→ drawness_target = 0.7
+```
+
+This is much more permissive (no game-wide max requirement) and is expected to
+yield ~8-10% drawness at 1850+ ELO, well above the 10% target.
+
+**Target:** 10% drawness, 400k+ training positions total (two months).
+
+**Why this is not overfitting on old data:** The SF-18 labels (value, bestmove
+policy, drawness targets) are new. The model trained on shallower evals and human
+moves before. Same board positions with different labels is not memorisation — the
+model must relearn its predictions. At millions of unique positions, position-level
+memorisation is not a concern. The position distribution (opening repertoire of
+2023-03 / 2025-01 games) is unchanged, but that affects breadth not correctness.
+
+### Immediate submissions
+
+```bash
+# Train on current data now
+bsub < jobs/train_low_elo_gpu.sh
+bsub -env "MONTH=01,YEAR=2025,N_CHUNKS_DONE=8,ROUND=2" < jobs/reeval_merge.sh
+# then train on round 2 after merge
+```
+
+### Parallel — drawness dataset from existing PGNs
+
+Both PGN files already on HPC. Submit after parse_drawness_source jobs complete.
+
+```bash
+# Parse (preserves game_ids, plys, outcome_values)
+bsub -env "YEAR=2023,MONTH=03,MAX_GAMES=150000,MIN_ELO=1850" < jobs/parse_drawness_source.sh
+bsub -env "YEAR=2025,MONTH=01,MAX_GAMES=150000,MIN_ELO=1850" < jobs/parse_drawness_source.sh
+
+# SF-18 reeval — 8 chunks each (3M positions / 8 = 375k per chunk ≈ 9.5h < 24h wall)
+for IDX in 0 1 2 3 4 5 6 7; do
+  bsub -env "YEAR=2023,MONTH=03,CHUNK_IDX=${IDX},N_CHUNKS=8" < jobs/reeval_drawness_depth18.sh
+  bsub -env "YEAR=2025,MONTH=01,CHUNK_IDX=${IDX},N_CHUNKS=8" < jobs/reeval_drawness_depth18.sh
+done
+
+# Merge with position-level drawness
+bsub -env "YEAR=2023,MONTH=03,N_CHUNKS=8,N_CHUNKS_DONE=8" < jobs/reeval_drawness_merge.sh
+bsub -env "YEAR=2025,MONTH=01,N_CHUNKS=8,N_CHUNKS_DONE=8" < jobs/reeval_drawness_merge.sh
+```
+
+Note: `reeval_drawness_depth18.sh` wall updated to 24h (was 12h).
+
+---
+
 ## Long-Term Phases
 
 | Phase | Goal |
