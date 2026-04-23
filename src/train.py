@@ -677,6 +677,7 @@ def train(dataset_path: str = None,
 
     best_val_loss  = float("inf")   # logged only; not used for stopping
     best_rank      = 0.0
+    best_rank_ever = 0.0            # tracks highest rank seen — saved to best_rank.pt
     best_cos       = float("inf")   # lower is better; inf = no measurement yet
     best_draw_gap  = float("-inf")
     geo_no_improve = 0
@@ -777,6 +778,9 @@ def train(dataset_path: str = None,
             geo_no_improve = 0
             if rank_improved:
                 best_rank = rank
+            if rank > best_rank_ever + 0.1:
+                best_rank_ever = rank
+                torch.save(model.state_dict(), os.path.join(out_dir, "best_rank.pt"))
             if cos_improved:
                 best_cos = cos
             if draw_improved:
