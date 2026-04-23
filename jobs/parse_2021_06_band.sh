@@ -8,11 +8,11 @@
 #BSUB -e /zhome/81/b/206091/logs/parse_2021_06_%J.err
 
 # Banded ELO parse for 2021-06 Lichess dataset.
-# Submit three times with BAND=low / mid / high:
+# Submit three times with BAND=low / mid / high (use -env to pass vars to LSF):
 #
-#   BAND=low  bsub < jobs/parse_2021_06_band.sh   # 1200-1800: decisive positions
-#   BAND=mid  bsub < jobs/parse_2021_06_band.sh   # 1800-2300: complex middlegames
-#   BAND=high bsub < jobs/parse_2021_06_band.sh   # 2300+:     quality positions
+#   bsub -env "BAND=low"  < jobs/parse_2021_06_band.sh   # 1200-1800: decisive positions
+#   bsub -env "BAND=mid"  < jobs/parse_2021_06_band.sh   # 1800-2300: complex middlegames
+#   bsub -env "BAND=high" < jobs/parse_2021_06_band.sh   # 2300+:     quality positions
 #
 # Outputs to $BLACKHOLE/dataset_2021_06_{low,mid,high}.pt
 # Next step: reeval each band, then feed exp_c (mid only) and exp_d (low+mid) to train.
