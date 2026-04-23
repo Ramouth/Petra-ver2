@@ -60,7 +60,8 @@ python3 -u "${SRC}/reeval_stockfish.py" \
     --derive-drawness-from-outcome \
     --drawness-game-level \
     --drawness-sf-threshold        0.11 \
-    --drawness-target              0.8
+    --drawness-target              0.8 \
+    --allow-partial-coverage
 
 echo
 echo "Done. Final dataset: ${OUT_FILE}"

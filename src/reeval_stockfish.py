@@ -754,7 +754,8 @@ def merge_partials(dataset_path: str,
                    drawness_min_ply: int = 40,
                    drawness_target: float = 0.7,
                    drawness_max_pieces: int = 32,
-                   drawness_game_level: bool = False):
+                   drawness_game_level: bool = False,
+                   allow_partial_coverage: bool = False):
     """
     Merge chunk partial files into a final dataset.
 
@@ -849,10 +850,13 @@ def merge_partials(dataset_path: str,
     missing_positions = np.where(~covered)[0]
     if len(missing_positions) > 0:
         lo, hi = int(missing_positions[0]), int(missing_positions[-1])
-        raise ValueError(
-            f"{len(missing_positions)} positions not covered by any partial "
-            f"(range [{lo}, {hi}]). Submit missing chunk jobs before merging."
-        )
+        if not allow_partial_coverage:
+            raise ValueError(
+                f"{len(missing_positions)} positions not covered by any partial "
+                f"(range [{lo}, {hi}]). Submit missing chunk jobs before merging."
+            )
+        print(f"  Partial merge: {len(missing_positions):,} positions uncovered "
+              f"(range [{lo}, {hi}]) — will be excluded from output.")
 
     print(f"\nAll {n_total:,} positions assembled from {len(partials)} partials "
           f"(depth={ref_depth}, n_chunks={ref_n_chunks}).")
@@ -1018,6 +1022,9 @@ Modes
     # Merge mode
     ap.add_argument("--merge", nargs="+", default=None, metavar="PARTIAL",
                     help="Merge mode: list of partial .pt files to combine into --out.")
+    ap.add_argument("--allow-partial-coverage", action="store_true",
+                    help="Allow merging when not all positions are covered by partials. "
+                         "Uncovered positions are excluded from the output dataset.")
 
     args = ap.parse_args()
 
@@ -1042,6 +1049,7 @@ Modes
             drawness_target=args.drawness_target,
             drawness_max_pieces=args.drawness_max_pieces,
             drawness_game_level=args.drawness_game_level,
+            allow_partial_coverage=args.allow_partial_coverage,
         )
 
     elif args.chunk_idx is not None:
