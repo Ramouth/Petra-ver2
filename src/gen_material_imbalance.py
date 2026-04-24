@@ -217,13 +217,11 @@ def _worker_eval(args):
 # Per-combo generation
 # ---------------------------------------------------------------------------
 
-def generate_combo(source_fens, piece_type, side, n_target,
-                   sf_path, depth, workers, rng):
+def generate_combo(pool, source_fens, piece_type, side, n_target, rng):
     """Generate up to n_target valid positions for (piece_type, side)."""
     name = f"{PIECE_NAME[piece_type]}/{side}"
     print(f"  [{name}]  target={n_target:,}  source pool={len(source_fens):,}")
 
-    # Shuffle source so we don't always hit the same games
     idxs = list(range(len(source_fens)))
     rng.shuffle(idxs)
     tasks = [(source_fens[i], piece_type, side) for i in idxs]
@@ -231,9 +229,11 @@ def generate_combo(source_fens, piece_type, side, n_target,
     tensors, values, move_idxs, masks = [], [], [], []
     t0 = time.time()
 
-    with multiprocessing.Pool(workers, initializer=_worker_init,
-                              initargs=(sf_path, depth)) as pool:
-        for result in pool.imap_unordered(_worker_eval, tasks):
+    # Reuse the shared pool — no per-combo pool creation/termination.
+    # imap_unordered streams results; we stop consuming once n_target reached.
+    it = pool.imap_unordered(_worker_eval, tasks, chunksize=64)
+    try:
+        for result in it:
             if result is None:
                 continue
             t, v, mi, pk = result
@@ -248,8 +248,9 @@ def generate_combo(source_fens, piece_type, side, n_target,
                 rate = done / elapsed
                 print(f"    {done:,} / {n_target:,}  ({rate:.1f} pos/s)")
             if done >= n_target:
-                pool.terminate()
                 break
+    finally:
+        it._coro = None   # discard the iterator without draining remaining tasks
 
     n = len(tensors)
     elapsed = time.time() - t0
@@ -293,26 +294,25 @@ def main():
         print("ERROR: source dataset has no FENs stored.")
         sys.exit(1)
 
-    # Generate all combos
+    # Single pool for all combos — avoids pool recreation/termination bugs.
     all_tensors, all_values, all_midxs, all_masks = [], [], [], []
 
-    for piece_type in PIECE_TYPES:
-        for side in SIDES:
-            result = generate_combo(
-                fens, piece_type, side,
-                n_target=args.n_per_combo,
-                sf_path=args.stockfish,
-                depth=args.depth,
-                workers=args.workers,
-                rng=rng,
-            )
-            if result is None:
-                continue
-            t, v, mi, pk = result
-            all_tensors.append(t)
-            all_values.append(v)
-            all_midxs.append(mi)
-            all_masks.append(pk)
+    with multiprocessing.Pool(args.workers, initializer=_worker_init,
+                              initargs=(args.stockfish, args.depth)) as pool:
+        for piece_type in PIECE_TYPES:
+            for side in SIDES:
+                result = generate_combo(
+                    pool, fens, piece_type, side,
+                    n_target=args.n_per_combo,
+                    rng=rng,
+                )
+                if result is None:
+                    continue
+                t, v, mi, pk = result
+                all_tensors.append(t)
+                all_values.append(v)
+                all_midxs.append(mi)
+                all_masks.append(pk)
 
     # Concatenate
     tensors   = np.concatenate(all_tensors)
