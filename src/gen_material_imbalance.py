@@ -229,28 +229,22 @@ def generate_combo(pool, source_fens, piece_type, side, n_target, rng):
     tensors, values, move_idxs, masks = [], [], [], []
     t0 = time.time()
 
-    # Reuse the shared pool — no per-combo pool creation/termination.
-    # imap_unordered streams results; we stop consuming once n_target reached.
-    it = pool.imap_unordered(_worker_eval, tasks, chunksize=64)
-    try:
-        for result in it:
-            if result is None:
-                continue
-            t, v, mi, pk = result
-            tensors.append(t)
-            values.append(v)
-            move_idxs.append(mi)
-            masks.append(pk)
+    for result in pool.imap_unordered(_worker_eval, tasks, chunksize=64):
+        if result is None:
+            continue
+        t, v, mi, pk = result
+        tensors.append(t)
+        values.append(v)
+        move_idxs.append(mi)
+        masks.append(pk)
 
-            done = len(tensors)
-            if done % 1000 == 0:
-                elapsed = time.time() - t0
-                rate = done / elapsed
-                print(f"    {done:,} / {n_target:,}  ({rate:.1f} pos/s)")
-            if done >= n_target:
-                break
-    finally:
-        it._coro = None   # discard the iterator without draining remaining tasks
+        done = len(tensors)
+        if done % 1000 == 0:
+            elapsed = time.time() - t0
+            rate = done / elapsed
+            print(f"    {done:,} / {n_target:,}  ({rate:.1f} pos/s)")
+        if done >= n_target:
+            break
 
     n = len(tensors)
     elapsed = time.time() - t0
@@ -294,25 +288,27 @@ def main():
         print("ERROR: source dataset has no FENs stored.")
         sys.exit(1)
 
-    # Single pool for all combos — avoids pool recreation/termination bugs.
     all_tensors, all_values, all_midxs, all_masks = [], [], [], []
 
-    with multiprocessing.Pool(args.workers, initializer=_worker_init,
-                              initargs=(args.stockfish, args.depth)) as pool:
-        for piece_type in PIECE_TYPES:
-            for side in SIDES:
+    for piece_type in PIECE_TYPES:
+        for side in SIDES:
+            # Fresh pool per combo: pool.__exit__ terminates workers and drains
+            # all in-flight tasks before the next combo, avoiding a race where
+            # the result-handler thread crashes on a stale job-id after early break.
+            with multiprocessing.Pool(args.workers, initializer=_worker_init,
+                                      initargs=(args.stockfish, args.depth)) as pool:
                 result = generate_combo(
                     pool, fens, piece_type, side,
                     n_target=args.n_per_combo,
                     rng=rng,
                 )
-                if result is None:
-                    continue
-                t, v, mi, pk = result
-                all_tensors.append(t)
-                all_values.append(v)
-                all_midxs.append(mi)
-                all_masks.append(pk)
+            if result is None:
+                continue
+            t, v, mi, pk = result
+            all_tensors.append(t)
+            all_values.append(v)
+            all_midxs.append(mi)
+            all_masks.append(pk)
 
     # Concatenate
     tensors   = np.concatenate(all_tensors)
