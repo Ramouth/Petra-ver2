@@ -1,20 +1,22 @@
 """
 gen_near_mate.py — Generate positions with forced mate in ≤ max_mate moves.
 
-Sources KQ vs K (stage 1), KR vs K (stage 2), and KQ vs KR (stage 4)
-as candidate positions, evaluates each with Stockfish depth-18, and
-keeps only positions where a forced mate is confirmed within max_mate
-half-moves from either side.
+Loads FENs from one or more real game datasets (mid-band, low-band, etc.),
+pre-filters to positions with high decisive value (likely forced outcomes),
+then confirms with Stockfish depth-18 that a forced mate exists within
+max_mate moves. Covers all position types (opening, middlegame, endgame)
+rather than constructed endgame stages.
 
-Labels: +1.0 if the side to move delivers the mate, -1.0 if the side
-to move is being mated.
+Labels: +1.0 if the side to move delivers the mate, -1.0 if mated.
 
 Usage:
     python3 gen_near_mate.py \\
-        --out     /blackhole/dataset_near_mate.pt \\
+        --sources  /blackhole/dataset_2021_06_mid_sf18.pt \\
+                   /blackhole/dataset_2021_06_low_sf18.pt \\
+        --out      /blackhole/dataset_near_mate.pt \\
         --stockfish ~/bin/stockfish \\
-        --n       220000 \\
-        --max-mate 7 \\
+        --n        50000 \\
+        --max-mate 3 \\
         --workers  16
 """
 
@@ -25,10 +27,14 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from board import board_to_tensor, move_to_index
-from generate_endgame import generate_positions
 
 VAL_FRACTION = 0.05
 _sf = None
+
+# Pre-filter threshold: only re-evaluate positions where existing SF value
+# is already decisive. tanh(cp/400) > 0.90 ≈ cp > 940. This is conservative —
+# mate-in-3 positions will typically have |value| close to 1.0 already.
+PREFILTER_THRESHOLD = 0.90
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +63,8 @@ class Stockfish:
                 return
 
     def evaluate(self, fen):
-        """Returns (value, mate_in, bestmove) or (None, None, None)."""
+        """Returns (value, mate_in, bestmove) or (None, None, None).
+        mate_in is None for centipawn scores."""
         self._send(f"position fen {fen}")
         self._send(f"go depth {self.depth}")
         cp = mate = None
@@ -79,8 +86,7 @@ class Stockfish:
                     bestmove = parts[1]
                 break
         if mate is not None:
-            value = 1.0 if mate > 0 else -1.0
-            return value, mate, bestmove
+            return 1.0 if mate > 0 else -1.0, mate, bestmove
         elif cp is not None:
             return math.tanh(cp / 400.0), None, bestmove
         return None, None, None
@@ -113,7 +119,10 @@ def _worker_init(sf_path, depth):
 
 def _worker_eval(args):
     fen, max_mate = args
-    board = chess.Board(fen)
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        return None
     if not board.is_valid() or board.is_game_over():
         return None
 
@@ -148,12 +157,14 @@ def _worker_eval(args):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--sources",   nargs="+", required=True,
+                    help="Source dataset(s) — FENs are pooled from all")
     ap.add_argument("--out",       required=True)
     ap.add_argument("--stockfish", default="/usr/games/stockfish")
     ap.add_argument("--depth",     type=int, default=18)
-    ap.add_argument("--n",         type=int, default=220000,
+    ap.add_argument("--n",         type=int, default=50000,
                     help="Target number of near-mate positions")
-    ap.add_argument("--max-mate",  type=int, default=7,
+    ap.add_argument("--max-mate",  type=int, default=3,
                     help="Keep positions with forced mate in ≤ this many moves")
     ap.add_argument("--workers",   type=int, default=16)
     ap.add_argument("--seed",      type=int, default=42)
@@ -161,24 +172,42 @@ def main():
 
     rng = random.Random(args.seed)
 
-    # Generate candidate positions from decisive endgame stages
-    print(f"Generating candidate positions (stages 1, 2, 4) ...")
-    # Over-generate: only a fraction will pass the mate filter
-    n_candidates = args.n * 6
-    candidates = generate_positions(n_candidates, stages=[1, 2, 4], include_mirrors=True)
-    fens = [item[0].fen() if hasattr(item[0], 'fen') else item[0] for item in candidates]
-    rng.shuffle(fens)
-    print(f"  Candidates: {len(fens):,}")
+    # Load FENs from all source datasets, pre-filter by decisive value
+    all_fens = []
+    for path in args.sources:
+        print(f"Loading {path} ...")
+        ds = torch.load(path, map_location="cpu", weights_only=False)
+        for split in ("train", "val"):
+            if split not in ds:
+                continue
+            fens   = ds[split].get("fens", [])
+            values = ds[split].get("values", None)
+            if not fens:
+                print(f"  WARNING: no FENs in {split} split of {path}")
+                continue
+            if values is not None:
+                vals = values.numpy() if hasattr(values, "numpy") else values
+                keep = [f for f, v in zip(fens, vals) if abs(float(v)) >= PREFILTER_THRESHOLD]
+            else:
+                keep = fens
+            all_fens.extend(keep)
+        print(f"  After pre-filter (|v| ≥ {PREFILTER_THRESHOLD}): {len(all_fens):,} FENs")
+
+    if not all_fens:
+        print("ERROR: no FENs found in source datasets.")
+        sys.exit(1)
+
+    rng.shuffle(all_fens)
+    print(f"\nTotal candidate FENs: {len(all_fens):,}")
+    print(f"Filtering for mate-in-{args.max_mate} with SF depth {args.depth} ...")
 
     tensors, values, move_idxs, masks = [], [], [], []
     t0 = time.time()
-
-    print(f"\nFiltering for mate-in-{args.max_mate} with SF depth {args.depth} ...")
-    tasks = [(fen, args.max_mate) for fen in fens]
+    tasks = [(fen, args.max_mate) for fen in all_fens]
 
     with multiprocessing.Pool(args.workers, initializer=_worker_init,
                                initargs=(args.stockfish, args.depth)) as pool:
-        for result in pool.imap_unordered(_worker_eval, tasks):
+        for i, result in enumerate(pool.imap_unordered(_worker_eval, tasks)):
             if result is None:
                 continue
             t, v, mi, pk = result
@@ -188,17 +217,18 @@ def main():
             masks.append(pk)
 
             done = len(tensors)
-            if done % 5000 == 0:
+            if done % 1000 == 0:
                 elapsed = time.time() - t0
-                rate = done / elapsed
-                scanned = done + sum(1 for _ in [])   # approximate
-                print(f"  {done:,} / {args.n:,}  ({rate:.1f} pos/s)")
+                rate = (i + 1) / elapsed
+                print(f"  {done:,} collected  (scanned {i+1:,} at {rate:.1f} pos/s)")
             if done >= args.n:
                 pool.terminate()
                 break
 
     n = len(tensors)
     print(f"\nCollected {n:,} near-mate positions (mate ≤ {args.max_mate})")
+    if n < args.n:
+        print(f"WARNING: only {n:,} collected — source pool exhausted before reaching {args.n:,}")
 
     # Train/val split
     idxs = list(range(n))
@@ -212,25 +242,22 @@ def main():
         v = np.array([values[i]    for i in subset], dtype=np.float32)
         m = np.array([move_idxs[i] for i in subset], dtype=np.int64)
         p = np.stack([masks[i]     for i in subset])
-        wins  = (v > 0.5).sum()
-        draws = (np.abs(v) <= 0.5).sum()
-        losses= (v < -0.5).sum()
-        print(f"    n={len(subset):,}  win={wins}  draw={draws}  loss={losses}")
+        wins   = int((v >  0.5).sum())
+        losses = int((v < -0.5).sum())
+        print(f"    n={len(subset):,}  win={wins:,}  loss={losses:,}")
         return {
-            "tensors":     torch.from_numpy(t),
-            "values":      torch.from_numpy(v),
-            "move_idxs":   torch.from_numpy(m),
-            "legal_masks": torch.from_numpy(p),
-            "drawness_mask":    torch.zeros(len(subset), dtype=torch.bool),
-            "drawness_targets": torch.zeros(len(subset), dtype=torch.float32),
-            "drawness_available": torch.ones(len(subset), dtype=torch.bool),
+            "tensors":              torch.from_numpy(t),
+            "values":               torch.from_numpy(v),
+            "move_idxs":            torch.from_numpy(m),
+            "legal_masks":          torch.from_numpy(p),
+            "drawness_mask":        torch.zeros(len(subset), dtype=torch.bool),
+            "drawness_targets":     torch.zeros(len(subset), dtype=torch.float32),
+            "drawness_available":   torch.ones(len(subset), dtype=torch.bool),
         }
 
     print("Building dataset ...")
-    print("  train:")
-    train_split = _split(train_i)
-    print("  val:")
-    val_split   = _split(val_i)
+    print("  train:"); train_split = _split(train_i)
+    print("  val:");   val_split   = _split(val_i)
 
     out = {
         "train": train_split,
