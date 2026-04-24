@@ -53,13 +53,14 @@ def merge_split(splits):
         "tensors":   torch.cat([s["tensors"]   for s in splits]),
         "values":    torch.cat([s["values"]    for s in splits]),
         "move_idxs": torch.cat([s["move_idxs"] for s in splits]),
-        "visit_dists": torch.cat([
-            s.get("visit_dists", torch.zeros(n, 4096)) for s, n in zip(splits, n_each)
-        ]),
         "drawness_mask":      torch.cat([s.get("drawness_mask",     torch.zeros(n, dtype=torch.bool))  for s, n in zip(splits, n_each)]),
         "drawness_targets":   torch.cat([s.get("drawness_targets",  torch.zeros(n))                    for s, n in zip(splits, n_each)]),
         "drawness_available": torch.cat([s.get("drawness_available",torch.zeros(n, dtype=torch.bool))  for s, n in zip(splits, n_each)]),
     }
+    if any("visit_dists" in s for s in splits):
+        result["visit_dists"] = torch.cat([
+            s.get("visit_dists", torch.zeros(n, 4096)) for s, n in zip(splits, n_each)
+        ])
     if any("legal_masks" in s for s in splits):
         result["legal_masks"] = torch.cat([
             s.get("legal_masks", torch.full((n, 512), 255, dtype=torch.uint8))
