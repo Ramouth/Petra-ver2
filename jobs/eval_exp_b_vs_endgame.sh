@@ -17,6 +17,6 @@ python3 -u /zhome/81/b/206091/Petra-ver2/src/evaluate.py \
     --model          /zhome/81/b/206091/Petra-ver2/models/exp_b_no_policy_strong/best.pt \
     --baseline-model /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03_endgame/best.pt \
     --step 5 \
-    --n-sim 100 \
-    --games 200 \
+    --n-sim 50 \
+    --games 100 \
     --workers 16
