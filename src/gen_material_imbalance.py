@@ -292,16 +292,22 @@ def main():
 
     for piece_type in PIECE_TYPES:
         for side in SIDES:
-            # Fresh pool per combo: pool.__exit__ terminates workers and drains
-            # all in-flight tasks before the next combo, avoiding a race where
-            # the result-handler thread crashes on a stale job-id after early break.
-            with multiprocessing.Pool(args.workers, initializer=_worker_init,
-                                      initargs=(args.stockfish, args.depth)) as pool:
+            # Fresh pool per combo. Use explicit terminate+join rather than the
+            # context manager: Pool.__exit__ only calls terminate(), not join(),
+            # so without join() the old workers (and their SF processes) are still
+            # alive when the next pool starts — momentarily doubling the process
+            # count and hitting HPC thread limits.
+            pool = multiprocessing.Pool(args.workers, initializer=_worker_init,
+                                        initargs=(args.stockfish, args.depth))
+            try:
                 result = generate_combo(
                     pool, fens, piece_type, side,
                     n_target=args.n_per_combo,
                     rng=rng,
                 )
+            finally:
+                pool.terminate()
+                pool.join()  # wait for all workers to fully exit before next pool
             if result is None:
                 continue
             t, v, mi, pk = result
