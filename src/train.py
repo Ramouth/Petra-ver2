@@ -149,8 +149,9 @@ def load_dataset(path: str):
                           num_workers=0, pin_memory=(device.type == "cuda"))
 
     meta = data.get("meta", {})
-    print(f"  train: {meta.get('n_train', '?'):,}  val: {meta.get('n_val', '?'):,}  "
-          f"source: {meta.get('source', 'supervised')}")
+    n_tr = meta.get('n_train'); n_tr_s = f"{n_tr:,}" if isinstance(n_tr, int) else "?"
+    n_va = meta.get('n_val');   n_va_s = f"{n_va:,}" if isinstance(n_va, int) else "?"
+    print(f"  train: {n_tr_s}  val: {n_va_s}  source: {meta.get('source', 'supervised')}")
     return make_loader, data, True   # always dense_policy=True now
 
 
@@ -675,12 +676,13 @@ def train(dataset_path: str = None,
         # With early_stop patience=5, allows up to 2 LR reductions before stopping
     )
 
-    best_val_loss  = float("inf")   # logged only; not used for stopping
-    best_rank      = 0.0
-    best_rank_ever = 0.0            # tracks highest rank seen — saved to best_rank.pt
-    best_cos       = float("inf")   # lower is better; inf = no measurement yet
-    best_draw_gap  = float("-inf")
-    geo_no_improve = 0
+    best_val_loss    = float("inf")   # logged only; not used for stopping
+    best_rank        = 0.0
+    best_rank_ever   = 0.0            # tracks highest rank seen — saved to best_rank.pt
+    best_cos         = float("inf")   # lower is better; inf = no measurement yet
+    best_draw_gap    = float("-inf")
+    geo_no_improve   = 0
+    last_topo_healthy = True          # assume healthy until first topology check
     topo_trajectory  = []
     topo_check_every = 2
     start_epoch      = 1
@@ -785,8 +787,13 @@ def train(dataset_path: str = None,
                 best_cos = cos
             if draw_improved:
                 best_draw_gap = draw["gap"]
-            torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
-            print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ new best")
+            # best.pt requires both rank improvement AND healthy topology
+            if rank_improved and last_topo_healthy:
+                torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
+                print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ new best")
+            else:
+                topo_note = "" if last_topo_healthy else "  [topo gate: not saved to best.pt]"
+                print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ improved (cos/draw){topo_note}")
         else:
             geo_no_improve += 1
             print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}"
@@ -801,6 +808,7 @@ def train(dataset_path: str = None,
             topo = topological_health_check(model, val_loader, epoch,
                                             device=device)
             topo_trajectory.append(topo)
+            last_topo_healthy = topo.get("verdict", "healthy") not in ("flat", "collapsing")
             print(format_topology_line(topo))
 
             abort, reason = should_abort_early(topo_trajectory)
