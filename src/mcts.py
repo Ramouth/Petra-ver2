@@ -179,7 +179,7 @@ class MCTS:
                 self._backup(leaf, leaf.terminal_value)
                 continue
 
-            if leaf.board.is_game_over():
+            if leaf.board.is_game_over(claim_draw=True):
                 value = self._terminal_value(leaf.board)
                 leaf.terminal_value = value
                 self._backup(leaf, value)

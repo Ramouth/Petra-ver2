@@ -278,12 +278,12 @@ def play_game(white: Agent, black: Agent, max_moves: int = 300):
     agents = {chess.WHITE: white, chess.BLACK: black}
 
     for _ in range(max_moves):
-        if board.is_game_over():
+        if board.is_game_over(claim_draw=True):
             break
         move = agents[board.turn].select_move(board)
         board.push(move)
 
-    outcome = board.outcome()
+    outcome = board.outcome(claim_draw=True)
     if outcome is None:
         result = "1/2-1/2"   # move limit reached
     elif outcome.winner == chess.WHITE:
@@ -551,11 +551,11 @@ def run_ablation(model: Optional[PetraNet], n_games: int = 100,
                                   workers=workers,
                                   pgn_out=pgn_out)
 
-    _print_ablation_summary(results)
+    _print_ablation_summary(results, baseline_model_path=baseline_model_path)
     return results
 
 
-def _print_ablation_summary(results: dict):
+def _print_ablation_summary(results: dict, baseline_model_path: str = None):
     print("\n" + "="*55)
     print("ABLATION SUMMARY")
     print("="*55)
@@ -569,10 +569,15 @@ def _print_ablation_summary(results: dict):
     # Gate check: step 5 is the critical one
     if 5 in results:
         gate = results[5]
-        if gate["win_rate"] > 0.55:
-            print("\nGATE PASSED — learned value beats material. Proceed to self-play.")
+        if baseline_model_path:
+            baseline_name = os.path.basename(os.path.dirname(baseline_model_path))
+            opponent_label = f"baseline ({baseline_name})"
         else:
-            print("\nGATE FAILED — learned value does not beat material.")
+            opponent_label = "material"
+        if gate["win_rate"] > 0.55:
+            print(f"\nGATE PASSED — learned value beats {opponent_label}. Proceed to self-play.")
+        else:
+            print(f"\nGATE FAILED — learned value does not beat {opponent_label}.")
             print("Do not proceed to self-play. Review training data and model.")
     if 6 in results:
         geo_result = results[6]
