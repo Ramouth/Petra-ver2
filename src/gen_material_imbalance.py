@@ -162,7 +162,15 @@ def _remove_piece(fen: str, piece_type: int, side: str) -> str | None:
 def _worker_init(sf_path, depth):
     global _sf
     _sf = Stockfish(sf_path, depth)
-    signal.signal(signal.SIGTERM, lambda *_: None)
+
+    def _on_sigterm(signum, frame):
+        try:
+            _sf.close()
+        except Exception:
+            pass
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
 
 def _worker_eval(args):
