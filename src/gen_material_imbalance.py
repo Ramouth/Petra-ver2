@@ -65,6 +65,10 @@ SIDES = ["stm", "opp"]
 
 VAL_FRACTION = 0.05   # 5% validation split
 
+_sf = None
+_sf_path = None
+_sf_depth = None
+
 # ---------------------------------------------------------------------------
 # Stockfish interface
 # ---------------------------------------------------------------------------
@@ -160,7 +164,9 @@ def _remove_piece(fen: str, piece_type: int, side: str) -> str | None:
 
 
 def _worker_init(sf_path, depth):
-    global _sf
+    global _sf, _sf_path, _sf_depth
+    _sf_path = sf_path
+    _sf_depth = depth
     _sf = Stockfish(sf_path, depth)
 
     def _on_sigterm(signum, frame):
@@ -175,12 +181,26 @@ def _worker_init(sf_path, depth):
 
 def _worker_eval(args):
     """Evaluate one (source_fen, piece_type, side) tuple."""
+    global _sf
     source_fen, piece_type, side = args
     mod_fen = _remove_piece(source_fen, piece_type, side)
     if mod_fen is None:
         return None
 
-    value, bestmove = _sf.evaluate(mod_fen)
+    try:
+        value, bestmove = _sf.evaluate(mod_fen)
+    except (BrokenPipeError, OSError):
+        # SF process died (stdin EOF race on pool teardown); restart and retry.
+        try:
+            _sf.close()
+        except Exception:
+            pass
+        try:
+            _sf = Stockfish(_sf_path, _sf_depth)
+            value, bestmove = _sf.evaluate(mod_fen)
+        except Exception:
+            return None
+
     if value is None:
         return None
 
