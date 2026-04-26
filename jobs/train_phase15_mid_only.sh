@@ -15,7 +15,7 @@ HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
 DATASET="${BLACKHOLE}/dataset_phase15_mid_sf18.pt"
-INIT_MODEL="${HOME_DIR}/Petra-ver2/models/feb_sf/best.pt"
+INIT_MODEL="${HOME_DIR}/Petra-ver2/models/2021_06_all/best.pt"
 OUT_DIR="${HOME_DIR}/Petra-ver2/models/phase15_mid_only"
 
 echo "=== Phase 1.5: mid_only ==="

@@ -16,7 +16,7 @@ SRC="${HOME_DIR}/Petra-ver2/src"
 
 DATASET="${BLACKHOLE}/dataset_phase15_mid_sf18.pt"
 EXTRA="${BLACKHOLE}/dataset_special_no_endgame.pt"
-INIT_MODEL="${HOME_DIR}/Petra-ver2/models/feb_sf/best.pt"
+INIT_MODEL="${HOME_DIR}/Petra-ver2/models/2021_06_all/best.pt"
 OUT_DIR="${HOME_DIR}/Petra-ver2/models/phase15_mid_no_endgame"
 
 echo "=== Phase 1.5: mid_no_endgame ==="

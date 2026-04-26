@@ -37,7 +37,7 @@ SPECIAL_NO_ENDGAME="${BLACKHOLE}/dataset_special_no_endgame.pt"
 SPECIAL_NO_NEARMATE="${BLACKHOLE}/dataset_special_no_nearmate.pt"
 SPECIAL_NO_MATERIAL="${BLACKHOLE}/dataset_special_no_material.pt"
 
-INIT_MODEL="${INIT_MODEL:-${HOME_DIR}/Petra-ver2/models/feb_sf/best.pt}"
+INIT_MODEL="${INIT_MODEL:-${HOME_DIR}/Petra-ver2/models/2021_06_all/best.pt}"
 OUT_DIR="${HOME_DIR}/Petra-ver2/models/phase15_${EXP}"
 
 case "${EXP}" in
