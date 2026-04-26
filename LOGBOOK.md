@@ -2,6 +2,47 @@
 
 ---
 
+## Phase 2A — Ablation: Decisiveness Level (planned 2026-04-26)
+
+**Hypothesis:** Training decisiveness level (|tanh(SF eval)| threshold) affects geometry quality and ELO. There is an optimal threshold: too low (all positions) includes too many near-equal positions that contribute little signal; too high shifts the label distribution away from the draw cluster and may degrade play.
+
+**Motivation:** Phase 1.5 showed that adding highly decisive data (endgame, nearmate, material — all >90% decisive) consistently hurt ELO. The mid_only dataset uses min-decisive=0.0 (all positions, ~44% decisive). This experiment isolates the decisiveness variable by holding n fixed and varying only the threshold applied at merge time.
+
+**Init model:** `models/phase15_mid_no_endgame/best.pt` (Phase 1.5 best by rank, rank 89.9)
+**Hyperparameters:** same as Phase 1.5 — `--policy-weight 0.0 --rank-reg 0.5 --lr 3e-4 --epochs 30 --geo-patience 5`
+**Eval baseline:** `models/feb_sf/best.pt`
+**Probe dataset:** `dataset_2021_06_mid_sf18.pt` (fixed, n=5000)
+
+### Data pipeline
+
+| Step | Script | Notes |
+|------|--------|-------|
+| Parse | `parse_dec_ablation.sh` ×5 + `parse_dec_ablation_merge.sh` | 5×50k games, 2025-02, 1800-2450 ELO, ~5M raw positions |
+| Reeval | `reeval_dec_ablation.sh` (×7 chunks in parallel) | SF depth 18, N=5,000,000 |
+| Merge | `reeval_dec_ablation_merge.sh` (×4 in parallel, DEC_LEVEL env var) | One dataset per threshold, all n=1,000,000 |
+
+### Ablation Conditions
+
+| Condition | min-decisive | Positions kept | Dataset |
+|-----------|-------------|----------------|---------|
+| dec00 | 0.0 | all (~100%) | `dataset_dec00_sf18.pt` |
+| dec03 | 0.3 | ~70% pass | `dataset_dec03_sf18.pt` |
+| dec05 | 0.5 | ~44% pass | `dataset_dec05_sf18.pt` |
+| dec07 | 0.7 | ~25% pass | `dataset_dec07_sf18.pt` |
+
+*All conditions: n=1,000,000 (controlled). If <1M positions pass at dec07, lower n uniformly.*
+
+### Results Summary
+
+| Condition | min-decisive | Rank | W·L (strict) | W·D (strict) | KR·KR | ELO Δ | wr |
+|-----------|-------------|------|--------------|--------------|-------|-------|-----|
+| dec00 | 0.0 | — | — | — | — | — | — |
+| dec03 | 0.3 | — | — | — | — | — | — |
+| dec05 | 0.5 | — | — | — | — | — | — |
+| dec07 | 0.7 | — | — | — | — | — | — |
+
+---
+
 ## Phase 1.5 — Ablation: Curated Dataset Components (2026-04-26)
 
 **Hypothesis:** Structured data (endgame + near-mate + material imbalance) improves geometry rank and ELO beyond mid-band data alone. Each component contributes independently.

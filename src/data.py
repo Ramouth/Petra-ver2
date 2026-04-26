@@ -116,13 +116,21 @@ def _iter_games(pgn_path: str, max_games: int, min_elo: int,
                 sampling: str = "random",
                 max_pieces: int = 0,
                 decisive_only: bool = False,
-                max_elo: int = 0):
+                max_elo: int = 0,
+                skip_games: int = 0):
     """
     Generator. Yields (game_id, result, [(board, move), ...]) for each
     accepted game. Applies all game-level filters inline.
     """
     games_parsed = games_skipped = 0
     with _open_pgn(pgn_path) as f:
+        if skip_games > 0:
+            print(f"  Fast-forwarding past first {skip_games:,} raw games ...", flush=True)
+            for _ in range(skip_games):
+                if chess.pgn.read_game(f) is None:
+                    return
+            print(f"  Done. Parsing up to {max_games:,} games from offset {skip_games:,}.",
+                  flush=True)
         while games_parsed < max_games:
             game = chess.pgn.read_game(f)
             if game is None:
@@ -203,7 +211,8 @@ def parse_pgn(pgn_path: str,
               checkpoint_path: str = "",
               checkpoint_every: int = 0,
               max_pieces: int = 0,
-              decisive_only: bool = False) -> RawDataset:
+              decisive_only: bool = False,
+              skip_games: int = 0) -> RawDataset:
     """
     Stream a PGN file and return a RawDataset (numpy arrays, no per-position Python objects).
 
@@ -240,7 +249,7 @@ def parse_pgn(pgn_path: str,
             pgn_path, max_games, min_elo, require_normal_termination, rng,
             skip_opening=skip_opening, positions_per_game=positions_per_game,
             sampling=sampling, max_pieces=max_pieces, decisive_only=decisive_only,
-            max_elo=max_elo):
+            max_elo=max_elo, skip_games=skip_games):
 
         if _stop_early:
             print(f"\n  Signal received — stopping after {game_id:,} games.", flush=True)
@@ -672,7 +681,51 @@ def main():
     ap.add_argument("--from-checkpoint", default="",
                     help="Skip parsing; load this raw checkpoint .pt and convert "
                          "it directly to the final dataset.")
+    ap.add_argument("--skip-games", type=int, default=0,
+                    help="Skip first N raw games before parsing (for parallel chunk jobs). "
+                         "Chunk K should set --skip-games K*M and --max-games M.")
+    ap.add_argument("--no-split", action="store_true",
+                    help="Save raw positions without train/val split, for use with "
+                         "--merge-raw. Output is a plain dict .pt, not a split dataset.")
+    ap.add_argument("--merge-raw", nargs="+", metavar="CHUNK_PT",
+                    help="Merge multiple --no-split chunk outputs into one split dataset. "
+                         "Game IDs are rebased to avoid collisions across chunks.")
     args = ap.parse_args()
+
+    # --merge-raw: combine multiple --no-split chunk outputs → one split dataset
+    if args.merge_raw:
+        print(f"=== Merging {len(args.merge_raw)} raw chunk(s) → {args.out} ===")
+        tensors_list, values_list, move_idxs_list = [], [], []
+        fens_all, game_ids_list, plys_list = [], [], []
+        game_id_offset = 0
+        for path in args.merge_raw:
+            print(f"  Loading {path} ...", flush=True)
+            chunk = torch.load(path, weights_only=False)
+            n = chunk["n_positions"]
+            gids = np.array(chunk["game_ids"], dtype=np.int32) + game_id_offset
+            game_id_offset = int(gids.max()) + 1
+            tensors_list.append(np.array(chunk["tensors"])[:n])
+            values_list.append(np.array(chunk["values"])[:n])
+            move_idxs_list.append(np.array(chunk["move_idxs"])[:n])
+            fens_all.extend(list(chunk["fens"])[:n])
+            game_ids_list.append(gids)
+            plys_list.append(np.array(chunk["plys"])[:n])
+            print(f"    {n:,} positions, game_ids {gids.min()}–{gids.max()}")
+        merged = RawDataset(
+            tensors   = np.concatenate(tensors_list),
+            values    = np.concatenate(values_list),
+            move_idxs = np.concatenate(move_idxs_list),
+            fens      = fens_all,
+            game_ids  = np.concatenate(game_ids_list),
+            plys      = np.concatenate(plys_list),
+        )
+        print(f"  Merged: {len(merged.fens):,} positions total")
+        validate_dataset(merged, strict=not args.no_strict)
+        split_and_save(merged, args.out, seed=args.seed,
+                       skip_opening=args.skip_opening,
+                       positions_per_game=args.positions_per_game,
+                       sampling=args.sampling)
+        return
 
     ckpt_path = args.out.replace(".pt", ".ckpt.pt") if args.checkpoint_every > 0 else ""
 
@@ -698,6 +751,7 @@ def main():
             checkpoint_every=args.checkpoint_every,
             max_pieces=args.max_pieces,
             decisive_only=args.decisive_only,
+            skip_games=args.skip_games,
         )
 
     if not dataset.fens:
@@ -707,10 +761,23 @@ def main():
     validate_dataset(dataset, strict=not args.no_strict)
 
     if not args.validate_only:
-        split_and_save(dataset, args.out, seed=args.seed,
-                       skip_opening=args.skip_opening,
-                       positions_per_game=args.positions_per_game,
-                       sampling=args.sampling)
+        if args.no_split:
+            raw_out = {
+                "tensors":     dataset.tensors,
+                "values":      dataset.values,
+                "move_idxs":   dataset.move_idxs,
+                "fens":        dataset.fens,
+                "game_ids":    dataset.game_ids,
+                "plys":        dataset.plys,
+                "n_positions": len(dataset.fens),
+            }
+            torch.save(raw_out, args.out)
+            print(f"Saved raw (no split) → {args.out}")
+        else:
+            split_and_save(dataset, args.out, seed=args.seed,
+                           skip_opening=args.skip_opening,
+                           positions_per_game=args.positions_per_game,
+                           sampling=args.sampling)
 
 
 if __name__ == "__main__":
