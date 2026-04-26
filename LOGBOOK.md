@@ -36,14 +36,16 @@
 
 | Condition | Rank | win·loss (strict) | win·draw (strict) | KR vs KR | ELO Δ vs feb_sf | wr vs feb_sf |
 |-----------|------|-------------------|-------------------|----------|-----------------|--------------|
-| mid_only | **86.2** | -0.5197 | 0.5478 | +0.072 | -85 | 38.0% |
+| mid_only | 86.2 | -0.5197 | +0.5478 | +0.072 | -85 | **38.0%** |
 | special_only | — | — | — | — | — | — |
-| mid_full | — | — | — | — | — | — |
+| mid_full | 87.9 | -0.6877 | **-0.1291** | +0.057 | -123 | 33.0% |
 | mid_no_endgame | — | — | — | — | — | — |
 | mid_no_nearmate | — | — | — | — | — | — |
-| mid_no_material | — | — | — | — | — | — |
+| mid_no_material | **88.8** | **-0.7328** | +0.1176 | +0.030 | (running) | (running) |
 
 *Previous best: 2021_06_all rank 87.0, wr 31.2% vs endgame baseline (different baseline — not directly comparable to ELO Δ vs feb_sf above).*
+
+**Emerging finding (2 of 6 complete):** Rank and ELO are decoupled. mid_full has better rank than mid_only (87.9 > 86.2) but worse ELO (33% vs 38%). mid_no_material has highest rank so far (88.8), suggesting material imbalance data hurts geometry despite being highly decisive. mid_full win·draw cosine went negative — draws shifted to cluster near losses, likely causing over-cautious play vs feb_sf.
 
 ---
 
