@@ -14,18 +14,21 @@
 # Drawn (drawness_target=1.0):
 #   9=KRvKR  10=KNNvK  11=KBvKB
 #
-# 25k base positions × 11 stages × ~4 mirror/turn variants ≈ 110k total.
+# 50k base positions × 11 stages × ~4 mirror/turn variants ≈ 220k total.
 # Used as --anchor-dataset with --draw-reg in Phase 1.5 training.
+# Output to a distinct file to avoid overwriting existing endgame_phase15.pt.
 #
 #   bsub < jobs/gen_endgame_phase15.sh
+
+OUT="/zhome/81/b/206091/Petra-ver2/data/endgame_phase15_50k.pt"
 
 source /zhome/81/b/206091/petra-env/bin/activate
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/generate_endgame.py \
-    --positions     25000 \
+    --positions     50000 \
     --stages        1 2 3 4 5 6 7 8 9 10 11 \
-    --out           /zhome/81/b/206091/Petra-ver2/data/endgame_phase15.pt \
+    --out           "${OUT}" \
     --seed          42
 
 echo
-echo "Done: /zhome/81/b/206091/Petra-ver2/data/endgame_phase15.pt"
+echo "Done: ${OUT}"
