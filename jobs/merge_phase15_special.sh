@@ -11,10 +11,22 @@
 # Each file is a different combination of special datasets so that
 # train.py --extra-dataset can swap them without re-merging.
 #
-#   Full:          endgame + near_mate + near_mate_losing + material
-#   No endgame:    near_mate + near_mate_losing + material
-#   No near-mate:  endgame + material
-#   No material:   endgame + near_mate + near_mate_losing
+# Source dataset position counts (train / val):
+#   endgame_phase15_50k.pt        172,230 / 19,136  (191,366 total)
+#   dataset_near_mate.pt           60,756 /  3,197   (63,953 total)
+#   dataset_near_mate_losing.pt    30,885 /  1,625   (32,510 total)
+#   dataset_material_imbalance.pt 190,000 / 10,000  (200,000 total)
+#
+# Ablation files (train positions):
+#   special_full:        453,871  (all four)
+#   special_no_endgame:  281,641  (near_mate + near_mate_losing + material)
+#   special_no_nearmate: 362,230  (endgame + material)
+#   special_no_material: 263,871  (endgame + near_mate + near_mate_losing)
+#
+# Mid-band available (~982k positions from partial reeval):
+#   reeval_phase15_mid_d18_part0  ~160k
+#   reeval_phase15_mid_d18_part1  ~662k  (complete)
+#   reeval_phase15_mid_d18_part2  ~160k
 #
 # Training conditions (6 total):
 #   1. mid only              --dataset mid_sf18
