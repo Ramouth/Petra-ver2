@@ -46,5 +46,5 @@ python3 -u "${SRC}/data.py" \
 
 echo
 echo "Done. Merged dataset: ${OUT_FILE}"
-echo "Next: submit 6 reeval chunks:"
-echo "  for i in 0 1 2 3 4 5; do bsub -env \"CHUNK_IDX=\$i\" < jobs/reeval_dec_ablation.sh; done"
+echo "Next: submit 7 reeval chunks:"
+echo "  for i in 0 1 2 3 4 5 6; do bsub -env \"CHUNK_IDX=\$i\" < jobs/reeval_dec_ablation.sh; done"

@@ -2,6 +2,22 @@
 
 ---
 
+## Head-to-head: mid_no_endgame vs mid_only (Job 28294106, 2026-04-26)
+
+**Result: statistically identical.** 400 games, n_sim=100, direct match.
+
+| W | D | L | wr | ELO Δ | 95% CI |
+|---|---|---|----|-------|--------|
+| 55 | 294 | 51 | 50.5% | +3 | [45.6%, 55.4%] |
+
+SE(wr) = 2.5pp — the CI straddles 50% on both sides. z = 0.2. Not significant.
+
+Draw rate 73.5% (294/400) — far higher than either model's ~55% rate vs feb_sf. Expected: two equal-strength models contest most games to a draw.
+
+**Conclusion:** The 9-ELO gap from independent vs-feb_sf runs (mid_only -85 vs mid_no_endgame -94) was noise, as predicted. **mid_no_endgame selected by rank tiebreaker (89.9 vs 86.2).** This is the Phase 2A init model.
+
+---
+
 ## Phase 2A — Ablation: Decisiveness Level (planned 2026-04-26)
 
 **Hypothesis:** Training decisiveness level (|tanh(SF eval)| threshold) affects geometry quality and ELO. There is an optimal threshold: too low (all positions) includes too many near-equal positions that contribute little signal; too high shifts the label distribution away from the draw cluster and may degrade play.
