@@ -2,6 +2,82 @@
 
 ---
 
+## Phase 1.5 — Ablation: Curated Dataset Components (2026-04-26)
+
+**Hypothesis:** Structured data (endgame + near-mate + material imbalance) improves geometry rank and ELO beyond mid-band data alone. Each component contributes independently.
+
+**Init model:** `models/2021_06_all/best.pt` (Phase 1 best, rank 87.0)
+**Hyperparameters:** `--policy-weight 0.0 --rank-reg 0.5 --lr 3e-4 --epochs 30 --geo-patience 5`
+**Eval baseline:** `models/feb_sf/best.pt`
+**Probe dataset:** `dataset_2021_06_mid_sf18.pt` (fixed, n=5000)
+
+### Datasets
+
+| Dataset | File | Train | Val |
+|---------|------|-------|-----|
+| Mid reeval (partial ~71%) | `dataset_phase15_mid_sf18.pt` | 1,346,701 | 70,879 |
+| Endgame (11 stages, 50k base) | `endgame_phase15_50k.pt` | 172,230 | 19,136 |
+| Near-mate winning (mate≤3) | `dataset_near_mate.pt` | 60,756 | 3,197 |
+| Near-mate losing | `dataset_near_mate_losing.pt` | 30,885 | 1,625 |
+| Material imbalance (10 combos) | `dataset_material_imbalance.pt` | 190,000 | 10,000 |
+
+### Ablation Conditions
+
+| Condition | Dataset | Extra dataset | Train total |
+|-----------|---------|---------------|-------------|
+| mid_only | mid_sf18 | — | 1,346,701 |
+| special_only | special_full | — | 453,871 |
+| mid_full | mid_sf18 | special_full | 1,800,572 |
+| mid_no_endgame | mid_sf18 | special_no_endgame | 1,628,342 |
+| mid_no_nearmate | mid_sf18 | special_no_nearmate | 1,708,931 |
+| mid_no_material | mid_sf18 | special_no_material | 1,610,572 |
+
+### Results Summary
+
+| Condition | Rank | win·loss (strict) | win·draw (strict) | KR vs KR | ELO Δ vs feb_sf | wr vs feb_sf |
+|-----------|------|-------------------|-------------------|----------|-----------------|--------------|
+| mid_only | **86.2** | -0.5197 | 0.5478 | +0.072 | -85 | 38.0% |
+| special_only | — | — | — | — | — | — |
+| mid_full | — | — | — | — | — | — |
+| mid_no_endgame | — | — | — | — | — | — |
+| mid_no_nearmate | — | — | — | — | — | — |
+| mid_no_material | — | — | — | — | — | — |
+
+*Previous best: 2021_06_all rank 87.0, wr 31.2% vs endgame baseline (different baseline — not directly comparable to ELO Δ vs feb_sf above).*
+
+---
+
+### mid_only — Full Results (Job 28292097 train / 28292139 eval)
+
+**Training:** Geo-patience stopped at epoch ~7. Training-time rank peaked at 59.5 — artefact of using training val split. Eval-time rank 86.2 is the honest metric.
+
+**Geometry probe:**
+
+| Metric | Value |
+|--------|-------|
+| Effective rank | **86.2 / 128** |
+| Win·loss cosine (strict) | -0.5197 |
+| Win·draw cosine (strict) | 0.5478 |
+| Separation gap | 0.1566 |
+| KR vs KR value | +0.072 |
+| KQ vs K White | +0.773 |
+| Queen-up White | +0.877 |
+| NN label consistency | 0.770 (lift +0.358) |
+| Topology | β0=1  β1=183  H=5.896 [healthy] |
+| Drawness gates | 0/4 (expected — draw-reg=0.0) |
+
+**ELO (200 games, n_sim=100, vs feb_sf):**
+
+| W | D | L | wr | ELO Δ |
+|---|---|---|----|-------|
+| 22 | 108 | 70 | **38.0%** | **-85** |
+
+**Note:** 38.0% vs feb_sf is +8pp over previous best at this matchup (30%). Rank 86.2 nearly matches Phase 1 best (87.0) despite different training data — geometry is robust to dataset composition changes at this scale.
+
+---
+
+---
+
 ## Doover — Supervised Pretraining (2026-04-13)
 *Job 28197059, GPU V100 (n-62-20-2), ~79s wall time*
 
