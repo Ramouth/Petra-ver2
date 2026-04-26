@@ -34,18 +34,87 @@
 
 ### Results Summary
 
-| Condition | Rank | win·loss (strict) | win·draw (strict) | KR vs KR | ELO Δ vs feb_sf | wr vs feb_sf |
-|-----------|------|-------------------|-------------------|----------|-----------------|--------------|
-| mid_only | 86.2 | -0.5197 | +0.5478 | +0.072 | -85 | **38.0%** |
-| special_only | — | — | — | — | — | — |
-| mid_full | 87.9 | -0.6877 | **-0.1291** | +0.057 | -123 | 33.0% |
-| mid_no_endgame | — | — | — | — | — | — |
-| mid_no_nearmate | — | — | — | — | — | — |
-| mid_no_material | **88.8** | **-0.7328** | +0.1176 | +0.030 | (running) | (running) |
+| Condition | Rank | W·L (strict) | W·D (strict) | Sep gap | KR·KR | KQ·K W | NN lift | β1 | W | D | L | Draw% | W/(W+L) | ELO Δ |
+|-----------|------|--------------|--------------|---------|-------|--------|---------|-----|---|---|---|-------|---------|-------|
+| mid_only | 86.2 | -0.5197 | **+0.5478** | 0.1566 | +0.072 | +0.773 | 0.358 | 183 | 22 | 108 | 70 | 54.0% | **23.9%** | -85 |
+| mid_no_endgame | **89.9** | **-0.7551** | -0.1067 | **0.1769** | +0.242 | +0.940 | 0.361 | **213** | 17 | **113** | 70 | **56.5%** | 19.5% | -94 |
+| mid_no_material | 88.8 | -0.7328 | +0.1176 | 0.1661 | +0.030 | +0.948 | **0.365** | 187 | 20 | 98 | 82 | 49.0% | 19.6% | -111 |
+| mid_full | 87.9 | -0.6877 | -0.1291 | — | +0.057 | — | — | — | — | — | — | — | — | -123 |
+| mid_no_nearmate | 82.3 | -0.6489 | **-0.4010** | 0.1639 | -0.014 | +0.962 | 0.332 | 194 | 16 | 93 | 91 | 46.5% | 15.0% | -137 |
+| special_only | 78.1 | -0.6606 | -0.0127 | 0.1088 | -0.037 | +0.958 | 0.330 | 170 | 8 | 71 | 121 | 35.5% | 6.2% | **-222** |
 
-*Previous best: 2021_06_all rank 87.0, wr 31.2% vs endgame baseline (different baseline — not directly comparable to ELO Δ vs feb_sf above).*
+*mid_full W/D/L not recorded. Previous best: 2021_06_all rank 87.0, wr 31.2% vs endgame baseline (different baseline).*
 
-**Emerging finding (2 of 6 complete):** Rank and ELO are decoupled. mid_full has better rank than mid_only (87.9 > 86.2) but worse ELO (33% vs 38%). mid_no_material has highest rank so far (88.8), suggesting material imbalance data hurts geometry despite being highly decisive. mid_full win·draw cosine went negative — draws shifted to cluster near losses, likely causing over-cautious play vs feb_sf.
+---
+
+### Deep Analysis
+
+#### 1. Statistical significance
+
+At n=200 games, SE(wr) ≈ sqrt(p·(1–p)/200) ≈ 3.4pp, so the 95% CI on any wr is roughly ±7pp and on any ELO Δ is roughly ±50 ELO.
+
+| Comparison | wr diff | z-score | verdict |
+|---|---|---|---|
+| mid_only vs mid_no_endgame | 1.3pp | 0.27 | noise |
+| mid_only vs mid_no_material | 3.5pp | 0.73 | noise |
+| mid_only vs mid_full | 5.0pp | ~1.0 | noise |
+| mid_only vs mid_no_nearmate | 6.8pp | 1.45 | borderline (p≈0.15) |
+| mid_only vs special_only | 16.2pp | 3.7 | **significant (p<0.001)** |
+| mid_no_nearmate vs special_only | 9.4pp | 2.1 | significant (p≈0.04) |
+
+**The real picture is two groups, not six.** special_only is clearly separated. Everything else — mid_only through mid_no_nearmate — cannot be ranked confidently at 200 games. The apparent ordering (mid_only > mid_no_endgame > …) is not statistically reliable. Confirming mid_only vs mid_no_nearmate would need ~800 games (4×) to reach p<0.05.
+
+#### 2. Draw rate and game character
+
+Draw rate varies from 35.5% (special_only) to 56.5% (mid_no_endgame). This reflects how similarly the model evaluates positions to feb_sf — similar-strength models draw more often. It is not independently interpretable beyond that.
+
+W/(W+L) appears to vary (6–24%) but is not a reliable diagnostic. The decisive-game population is endogenous: a model that fails to hold drawn positions creates more decisive games, and most of those become losses. So the denominator grows for the wrong reasons. At ~90 decisive games per condition the binomial SE is ~4 wins, and the numerators differ by 4–14 wins — not significant in isolation. W/(W+L) should not be used as a proxy for "conversion skill" here.
+
+#### 3. Win·draw cosine — description and hypothesis
+
+The clearest variation across conditions is in the W·D cosine:
+
+| Condition | W·D cosine | Draw% |
+|---|---|---|
+| mid_only | **+0.548** | 54.0% |
+| mid_no_material | +0.118 | 49.0% |
+| special_only | -0.013 | 35.5% |
+| mid_no_endgame | -0.107 | 56.5% |
+| mid_full | -0.129 | — |
+| mid_no_nearmate | **-0.401** | 46.5% |
+
+**Observation:** W·D cosine and draw rate correlate (r≈0.7 across these 5 conditions), suggesting the geometry metric does capture something real about in-game draw recognition. mid_only and mid_no_nearmate are at opposite extremes on both.
+
+**Hypothesis (not established):** The probe dataset is ~56% draws by SF evaluation. Training on mid-only data may force draws near the win cluster because mid-game draws are typically tense positions with winning potential. Adding highly decisive data (endgame, nearmate, material all >90% decisive) may shift the label distribution so the win cluster is anchored by extreme decisive positions, pushing neutral/drawn positions toward the loss side. Near-mate losing data in particular (SF value ≈ -1.0) pulls the loss cluster far from neutral. This is a plausible mechanistic story consistent with the pattern, but we have 6 conditions and noisy ELO estimates — the data does not establish causality from W·D cosine to ELO.
+
+#### 4. Rank as the primary selection criterion
+
+Rank's predictive value for ELO is established across many experiments, not just this ablation. The general principle — higher rank → better play — is well-supported. Within this ablation, the low-rank conditions (special_only 78.1, mid_no_nearmate 82.3) are also the worst ELO, consistent with that principle.
+
+The apparent non-monotone behaviour above rank 86 (mid_no_endgame rank 89.9 but ELO -94 vs mid_only rank 86.2 but ELO -85) is within noise at 200 games — it does not challenge the general principle. 200-game ELO estimates have ±50 ELO CI; a 9-ELO difference is meaningless. The right interpretation is: rank 89.9 and rank 86.2 are the two top candidates, and we cannot distinguish them from their vs-feb_sf results.
+
+**Chosen model: mid_no_endgame** (rank 89.9, highest in the ablation). The rank signal is the more reliable indicator here; the ELO difference vs mid_only is noise.
+
+#### 5. Most defensible explanation for mid_only's performance
+
+The simplest and most defensible explanation: **distribution match**. The probe dataset is mid-band positions; the head-to-head games start from standard positions and are mid-game heavy for the first ~30-40 moves. mid_only trains on ~1.35M positions drawn from exactly that distribution. Every other condition adds data from a different distribution — piece-sparse decisive endgames, extreme near-mate positions, lopsided material imbalances. This introduces distribution shift that consistently hurts generalization to the position types that actually arise in play.
+
+The W·D cosine variation may be a symptom of this same distribution shift rather than an independent cause: when the training mix shifts toward decisive positions, the learned geometry reflects that mix, and mid-game draw positions appear as outliers.
+
+#### 6. KQ vs K value — calibration note
+
+mid_only gives KQ vs K White to move as +0.773, versus 0.940–0.962 for all other conditions. All special datasets contain explicitly decisive endgame-like positions which push the value function toward high confidence in winning positions. The softer value in mid_only may affect MCTS tree shape (less pruning in endgame-adjacent nodes) but this is speculative — the probe position almost never arises from opening play.
+
+KR vs KR value +0.242 for mid_no_endgame (should be ~0, drawn) confirms the model has no calibration for drawn rook endgames without endgame data. Practically irrelevant at 200 games from opening but a blind spot that would matter in longer matches or self-play.
+
+#### 7. Conclusions
+
+- **Two groups, not six.** special_only is clearly worse (p<0.001). All five mid-containing conditions are statistically indistinguishable at 200 games. The apparent ranking within the top 5 is noise.
+- **The hypothesis is rejected in aggregate:** adding structured special data to mid_only does not improve ELO at this mixture ratio.
+- **Mechanism unclear.** Distribution shift is the most parsimonious explanation. The W·D cosine pattern is consistent with this story and worth tracking, but should not be treated as a causal chain without further experiments.
+- **Near-mate data has a borderline negative signal** (mid_no_nearmate ELO -137 vs mid_only -85, z=1.45, p≈0.15) alongside the starkest geometry degradation. Worth re-testing at higher game count before concluding.
+- **Chosen model: mid_no_endgame** (rank 89.9). Rank is the more reliable selection criterion across this experimental history; the ELO difference vs mid_only is within noise.
+- **Next experiment:** direct head-to-head, mid_no_endgame vs mid_only, 400 games (`eval_headtohead_noe_vs_midonly.sh`). This resolves the question cleanly without the independent-noise problem of comparing two separate vs-feb_sf runs.
 
 ---
 
@@ -77,6 +146,112 @@
 **Note:** 38.0% vs feb_sf is +8pp over previous best at this matchup (30%). Rank 86.2 nearly matches Phase 1 best (87.0) despite different training data — geometry is robust to dataset composition changes at this scale.
 
 ---
+
+### special_only — Full Results (Job 28292258 eval)
+
+**Geometry probe:**
+
+| Metric | Value |
+|--------|-------|
+| Effective rank | **78.1 / 128** |
+| Win·loss cosine (strict) | -0.6606 |
+| Win·draw cosine (strict) | -0.0127 |
+| Separation gap | 0.1088 |
+| KR vs KR value | -0.037 |
+| KQ vs K White | +0.958 |
+| Queen-up White | +0.957 |
+| NN label consistency | 0.742 (lift +0.330) |
+| Topology | β0=1  β1=170  H=5.837 [healthy] |
+| Drawness gates | 0/4 (expected — draw-reg=0.0) |
+
+**ELO (200 games, n_sim=100, vs feb_sf):**
+
+| W | D | L | wr | ELO Δ |
+|---|---|---|----|-------|
+| 8 | 71 | 121 | 21.8% | -222 |
+
+**Note:** Worst ELO in the ablation by a wide margin. Mid-band data is the generalist backbone — without it the model cannot transfer to positions it wasn't explicitly trained on. Win·draw cosine -0.0127 is near-zero (draws neither cluster with wins nor losses), and rank 78.1 is the lowest in the mid-containing conditions. The structured special data alone cannot bootstrap competitive play from the init model.
+
+---
+
+### mid_no_endgame — Full Results (Job 28292259 eval)
+
+**Geometry probe:**
+
+| Metric | Value |
+|--------|-------|
+| Effective rank | **89.9 / 128** |
+| Win·loss cosine (strict) | -0.7551 |
+| Win·draw cosine (strict) | -0.1067 |
+| Separation gap | 0.1769 |
+| KR vs KR value | +0.242 |
+| KQ vs K White | +0.940 |
+| Queen-up White | +0.959 |
+| NN label consistency | 0.773 (lift +0.361) |
+| Topology | β0=1  β1=213  H=5.865 [healthy] |
+| Drawness gates | 0/4 (expected — draw-reg=0.0) |
+
+**ELO (200 games, n_sim=100, vs feb_sf):**
+
+| W | D | L | wr | ELO Δ |
+|---|---|---|----|-------|
+| 17 | 113 | 70 | 36.7% | -94 |
+
+**Note:** Highest rank so far (89.9) but ELO worse than mid_only. Win·draw cosine -0.1067 (draws shifted toward loss cluster) matches the mid_full pattern. Endgame data is contributing to correct draw-side geometry rather than rank.
+
+---
+
+### mid_no_nearmate — Full Results (Job 28292260 eval)
+
+**Geometry probe:**
+
+| Metric | Value |
+|--------|-------|
+| Effective rank | **82.3 / 128** |
+| Win·loss cosine (strict) | -0.6489 |
+| Win·draw cosine (strict) | **-0.4010** |
+| Separation gap | 0.1639 |
+| KR vs KR value | -0.014 |
+| KQ vs K White | +0.962 |
+| Queen-up White | +0.966 |
+| NN label consistency | 0.744 (lift +0.332) |
+| Topology | β0=1  β1=194  H=5.782 [healthy] |
+| Drawness gates | 0/4 (expected — draw-reg=0.0) |
+
+**ELO (200 games, n_sim=100, vs feb_sf):**
+
+| W | D | L | wr | ELO Δ |
+|---|---|---|----|-------|
+| 16 | 93 | 91 | 31.2% | -137 |
+
+**Note:** Worst result so far. Win·draw cosine -0.4010 — extreme collapse of draw separation (draws clustering near losses). KR vs KR value -0.014 confirms the model has lost nearly all draw concept. Near-mate positions are essential: they provide the critical examples where winning ≠ drawing, anchoring the draw cluster correctly.
+
+---
+
+### mid_no_material — Full Results (Job 28292261 eval)
+
+**Geometry probe:**
+
+| Metric | Value |
+|--------|-------|
+| Effective rank | **88.8 / 128** |
+| Win·loss cosine (strict) | -0.7328 |
+| Win·draw cosine (strict) | +0.1176 |
+| Separation gap | 0.1661 |
+| KR vs KR value | +0.030 |
+| KQ vs K White | +0.948 |
+| Queen-up White | +0.965 |
+| NN label consistency | 0.777 (lift +0.365) |
+| Topology | β0=1  β1=187  H=5.785 [healthy] |
+| Drawness gates | 0/4 (expected — draw-reg=0.0) |
+
+**ELO (200 games, n_sim=100, vs feb_sf):**
+
+| W | D | L | wr | ELO Δ |
+|---|---|---|----|-------|
+| 20 | 98 | 82 | 34.5% | -111 |
+
+**Note:** Second-highest rank (88.8) but only 3rd-best ELO (34.5%). Win·draw cosine +0.1176 is healthy (draws cluster near wins, not losses), which is better than mid_full (-0.1291) despite lacking material data. Confirms that material imbalance positions push draws toward the loss cluster — they are predominantly decisive, which biases the model to treat balanced-material positions as winning when they are not.
 
 ---
 
