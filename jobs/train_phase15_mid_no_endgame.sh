@@ -40,7 +40,7 @@ python3 -u "${SRC}/train.py" \
     --init-model     "${INIT_MODEL}" \
     --out            "${OUT_DIR}" \
     --policy-weight  0.0 \
-    --rank-reg       0.1 \
+    --rank-reg       0.5 \
     --draw-reg       0.0 \
     --weight-decay   5e-4 \
     --lr             3e-4 \
