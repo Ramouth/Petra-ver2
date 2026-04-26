@@ -293,11 +293,15 @@ def main():
     ap.add_argument("--depth",       type=int, default=18)
     ap.add_argument("--n-per-combo", type=int, default=20000,
                     help="Target positions per (piece_type × side) combination")
+    ap.add_argument("--sides",       choices=["stm", "opp", "both"], default="both",
+                    help="Which sides to generate: stm (STM loses piece), opp (STM gains piece), both")
     ap.add_argument("--workers",     type=int, default=16)
     ap.add_argument("--seed",        type=int, default=42)
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
+
+    sides_to_run = ["stm", "opp"] if args.sides == "both" else [args.sides]
 
     # Load source FENs (combine train + val)
     print(f"Loading source dataset: {args.source}")
@@ -311,7 +315,7 @@ def main():
     all_tensors, all_values, all_midxs, all_masks = [], [], [], []
 
     for piece_type in PIECE_TYPES:
-        for side in SIDES:
+        for side in sides_to_run:
             # Fresh pool per combo. Use explicit terminate+join rather than the
             # context manager: Pool.__exit__ only calls terminate(), not join(),
             # so without join() the old workers (and their SF processes) are still
@@ -365,7 +369,8 @@ def main():
             "source":    args.source,
             "depth":     args.depth,
             "n_per_combo": args.n_per_combo,
-            "n_combos":  len(PIECE_TYPES) * len(SIDES),
+            "sides":     args.sides,
+            "n_combos":  len(PIECE_TYPES) * len(sides_to_run),
             "n_train":   len(tr_idx),
             "n_val":     n_val,
         },
