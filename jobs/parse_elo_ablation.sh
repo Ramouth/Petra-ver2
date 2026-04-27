@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J parse_elo${MIN_ELO:-2000}
+#BSUB -J parse_elo_ablation
 #BSUB -q hpc
 #BSUB -n 1
 #BSUB -R "rusage[mem=16GB]"
