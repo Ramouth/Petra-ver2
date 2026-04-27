@@ -392,7 +392,8 @@ def _apply_filter_and_save(
         valid_mask: torch.Tensor,
         out_path: str,
         min_decisive: float,
-        max_pieces: int,
+        max_decisive: float = 1.0,
+        max_pieces: int = 32,
         seed: int = 42,
         decisive_game_fraction: float = None,
         n_output: int = None,
@@ -474,12 +475,12 @@ def _apply_filter_and_save(
     print(f"  |v|<0.1 (equal):    {(np.abs(vals) < 0.1).mean()*100:.1f}%")
 
     keep = list(range(n))
-    if min_decisive > 0.0 or max_pieces < 32:
+    if min_decisive > 0.0 or max_decisive < 1.0 or max_pieces < 32:
         keep = []
         skipped_eval = skipped_pieces = 0
         for i, fen in enumerate(all_fens):
             v = float(new_values[i])
-            if abs(v) < min_decisive:
+            if abs(v) < min_decisive or abs(v) > max_decisive:
                 skipped_eval += 1
                 continue
             board = chess.Board(fen)
@@ -490,7 +491,7 @@ def _apply_filter_and_save(
             keep.append(i)
 
         print(f"\nFilter applied:")
-        print(f"  min_decisive={min_decisive}  max_pieces={max_pieces}")
+        print(f"  min_decisive={min_decisive}  max_decisive={max_decisive}  max_pieces={max_pieces}")
         print(f"  Kept:             {len(keep):,} / {n:,}")
         print(f"  Dropped (eval):   {skipped_eval:,}")
         print(f"  Dropped (pieces): {skipped_pieces:,}")
@@ -850,6 +851,7 @@ def merge_partials(dataset_path: str,
                    partial_paths: list,
                    out_path: str,
                    min_decisive: float = 0.0,
+                   max_decisive: float = 1.0,
                    max_pieces: int = 32,
                    n: int = 200_000,
                    seed: int = 42,
@@ -975,6 +977,7 @@ def merge_partials(dataset_path: str,
         valid_mask=valid_mask,
         out_path=out_path,
         min_decisive=min_decisive,
+        max_decisive=max_decisive,
         max_pieces=max_pieces,
         seed=seed,
         decisive_game_fraction=decisive_game_fraction,
@@ -1001,6 +1004,7 @@ def reeval(dataset_path: str,
            seed: int = 42,
            workers: int = 1,
            min_decisive: float = 0.0,
+           max_decisive: float = 1.0,
            max_pieces: int = 32,
            derive_drawness_from_outcome: bool = False,
            drawness_sf_threshold: float = 0.15,
@@ -1039,6 +1043,7 @@ def reeval(dataset_path: str,
         valid_mask=valid_mask,
         out_path=out_path,
         min_decisive=min_decisive,
+        max_decisive=max_decisive,
         max_pieces=max_pieces,
         derive_drawness_from_outcome=derive_drawness_from_outcome,
         drawness_sf_threshold=drawness_sf_threshold,
@@ -1093,6 +1098,9 @@ Modes
                     help="Parallel Stockfish processes (single-job and chunk modes)")
     ap.add_argument("--min-decisive", type=float, default=0.0,
                     help="Keep only |tanh(eval)| >= this. 0.0 = keep all (default).")
+    ap.add_argument("--max-decisive", type=float, default=1.0,
+                    help="Keep only |tanh(eval)| <= this. 1.0 = keep all (default). "
+                         "Use e.g. 0.1 to extract near-draw positions.")
     ap.add_argument("--max-pieces",   type=int,   default=32,
                     help="Keep only positions with <= this many pieces (default: 32).")
     ap.add_argument("--derive-drawness-from-outcome", action="store_true",
@@ -1155,6 +1163,7 @@ Modes
             partial_paths=args.merge,
             out_path=args.out,
             min_decisive=args.min_decisive,
+            max_decisive=args.max_decisive,
             max_pieces=args.max_pieces,
             n=args.n,
             seed=args.seed,
@@ -1198,6 +1207,7 @@ Modes
             seed=args.seed,
             workers=args.workers,
             min_decisive=args.min_decisive,
+            max_decisive=args.max_decisive,
             max_pieces=args.max_pieces,
             derive_drawness_from_outcome=args.derive_drawness_from_outcome,
             drawness_sf_threshold=args.drawness_sf_threshold,
