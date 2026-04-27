@@ -637,3 +637,106 @@ sufficiently varied. This is an empirical question — WDL is not obviously supe
 **Decision:** run decisiveness zigzag + draw perp loss on the scalar architecture first.
 Measure the rank ceiling. WDL is the architectural comparison once that ceiling is
 known.
+
+---
+
+## Phase 2A — Decisiveness Ablation Results (2026-04-27)
+
+**Hypothesis tested:** Higher SF decisiveness threshold → more decisive positions → stronger geometry signal → better ELO.
+
+**Result: Hypothesis WRONG.** DEC_LEVEL=0.0 (no filter, natural mix) is best on every metric.
+
+### Dataset
+
+~4.96M positions from Lichess 2025-02, ELO 1800–2450, SF depth-18 reeval.
+Natural decisive rate: 39.9% (`|SF eval| > 0.5`). Game-outcome draw rate: **5.2%**.
+
+### Final geometry probe results
+
+| DEC_LEVEL | Effective rank | win·loss cosine | win·draw cosine | β1 loops |
+|-----------|---------------|-----------------|-----------------|----------|
+| 0.0 | **80.3** | -0.69 | **-0.30** | **175** |
+| 0.3 | 69.7 | -0.61 | +0.22 | 160 |
+| 0.5 | 72.1 | -0.82 | +0.29 | 168 |
+| 0.7 | 50.4 | -0.83 | -0.15 | 126 |
+
+### Final head-to-head vs feb_sf (200 games, n_sim=100)
+
+Draws excluded from primary metric — threefold repetition draws are noisy engine
+artefacts, not signals of strength. Win count is the clean metric.
+
+| DEC_LEVEL | Wins | Losses | ELO Δ |
+|-----------|------|--------|-------|
+| 0.0 | **20** | **71** | **-91** |
+| 0.3 | 20 | 83 | -113 |
+| 0.5 | 13 | 82 | -125 |
+| 0.7 | 18 | 91 | -133 |
+
+All conditions fail the gate (ELO Δ < 0 vs feb_sf).
+
+### Key findings
+
+**1. The draw concept is missing.** Only 5.2% of training positions come from drawn
+games. The model rarely sees draws and cannot build a distinct draw region in its
+geometry. DEC_LEVEL=0.0 has win·draw = -0.30 (draws genuinely orthogonal to wins —
+three-pole geometry). Higher decisive filtering pushes the draw centroid toward the win
+pole (win·draw > 0), collapsing to a two-pole geometry.
+
+**2. Decisive filtering increases losses, not wins.** More filtering → model gets
+overconfident in positions it should hold as draws → more losses. DEC_LEVEL=0.3 and
+0.0 tie on wins (20 each) but 0.0 has 71 losses vs 0.3's 83. The harm is in
+misjudging drawable positions, not in winning power.
+
+**3. Decisiveness is a proxy for low ELO, not quality.** Lichess 1800–2450 games are
+mostly won by blunder. High-ELO games (2200+) have genuine positional draws — higher
+draw rate, higher quality draw positions. The fix is better source data, not filtering.
+
+### Revised understanding
+
+The original decisiveness hypothesis was based on SF depth ≤ 10 producing label
+clustering near 0 (memory: "Shallow SF depth → too few decisive positions → tanh labels
+cluster near 0 → weak geometry signal"). At depth 18, this is not the bottleneck. The
+bottleneck is now the draw rate of source games, not label magnitude distribution.
+
+---
+
+## Phase 2B — ELO Ablation Design (2026-04-27)
+
+**Hypothesis:** Higher-ELO source games have more genuine draws → model learns draw
+concept → better draw geometry → better ELO.
+
+Three parse conditions submitted from Lichess 2025-02 PGN:
+
+| MIN_ELO | Expected draw rate | Output |
+|---------|-------------------|--------|
+| 2000 | ~8–10% | `dataset_elo2000_raw.pt` |
+| 2100 | ~10–15% | `dataset_elo2100_raw.pt` |
+| 2200 | ~15–20% | `dataset_high_elo_raw.pt` |
+
+Each will be SF reeval'd (depth 18, 7 chunks), merged with `--min-decisive 0.0`
+(no filter — Phase 2A result), and trained from `phase15_mid_no_endgame/best.pt`.
+
+**Primary check after parse:** `python3 src/check_draw_rate.py <dataset>` to confirm
+draw rate increases with ELO.
+
+**Primary eval metric:** win count vs feb_sf (not win rate — draws are noisy).
+
+---
+
+## Phase 2C — SF Drawness Curriculum Design (2026-04-27)
+
+**Hypothesis:** Directly generating SF-confirmed near-draw positions and blending them
+into training is a more principled way to teach the draw concept than relying on
+game-outcome draw rate.
+
+**Approach:** Use `--max-decisive 0.1` (new flag, added 2026-04-27) to extract
+positions where `|SF eval| ≤ 0.1` from the existing 4.96M reeval dataset. Blend at
+controlled fractions (5%, 20%, 50%) into standard training data.
+
+**Advantage over ELO banding:** No new SF evaluations needed — the existing reeval
+data is already there. Direct control over draw position fraction rather than relying
+on ELO as a proxy.
+
+**Note on multiple Lichess files:** Additional months available (2021-06, 2023-03,
+2025-01, 2025-02). If 2200+ games are too sparse in a single month, chain months
+to reach 250k qualifying games.
