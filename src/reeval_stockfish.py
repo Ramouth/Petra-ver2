@@ -393,6 +393,9 @@ def _apply_filter_and_save(
         out_path: str,
         min_decisive: float,
         max_pieces: int,
+        seed: int = 42,
+        decisive_game_fraction: float = None,
+        n_output: int = None,
         derive_drawness_from_outcome: bool = False,
         drawness_sf_threshold: float = 0.15,
         drawness_min_ply: int = 40,
@@ -525,6 +528,73 @@ def _apply_filter_and_save(
         filtered_vals = new_values.numpy()
         print(f"  Post-filter decisive rate: "
               f"{(np.abs(filtered_vals) > 0.5).mean()*100:.1f}%")
+
+    # Stratified sampling by game outcome (decisive vs drawn games).
+    # Uses all_outcome_values: |v|>0.5 = decisive game, v≈0 = drawn game.
+    if decisive_game_fraction is not None:
+        if all_outcome_values is None:
+            raise ValueError(
+                "--decisive-game-fraction requires outcome_values in dataset. "
+                "Re-parse the PGN with the updated data.py."
+            )
+        if n_output is None:
+            raise ValueError("--decisive-game-fraction requires --n-output")
+
+        n_cur = len(all_fens)
+        dec_mask = all_outcome_values.abs() > 0.5
+        dec_idx  = dec_mask.nonzero(as_tuple=True)[0].tolist()
+        draw_idx = (~dec_mask).nonzero(as_tuple=True)[0].tolist()
+
+        n_dec  = round(n_output * decisive_game_fraction)
+        n_draw = n_output - n_dec
+
+        print(f"\nStratified sampling by game outcome:")
+        print(f"  Pool: {len(dec_idx):,} decisive  {len(draw_idx):,} drawn  "
+              f"({len(dec_idx)/n_cur*100:.1f}% decisive)")
+        print(f"  decisive_game_fraction={decisive_game_fraction}  n_output={n_output:,}")
+        print(f"  Target: {n_dec:,} decisive + {n_draw:,} drawn")
+
+        if len(dec_idx) < n_dec:
+            raise ValueError(
+                f"Decisive pool too small: {len(dec_idx):,} positions, need {n_dec:,}. "
+                f"Lower --n-output or --decisive-game-fraction."
+            )
+        if len(draw_idx) < n_draw:
+            raise ValueError(
+                f"Draw pool too small: {len(draw_idx):,} positions, need {n_draw:,}. "
+                f"Lower --n-output or raise --decisive-game-fraction."
+            )
+
+        rng = np.random.default_rng(seed + 99)
+        s_dec  = rng.choice(dec_idx,  n_dec,  replace=False) if n_dec  > 0 else np.array([], dtype=np.int64)
+        s_draw = rng.choice(draw_idx, n_draw, replace=False) if n_draw > 0 else np.array([], dtype=np.int64)
+        strat_keep = np.sort(np.concatenate([s_dec, s_draw])).astype(np.int64)
+        strat_t    = torch.from_numpy(strat_keep)
+
+        new_values       = new_values[strat_t]
+        all_tensors      = all_tensors[strat_t]
+        final_move_idxs  = final_move_idxs[strat_t]
+        all_packed_masks = all_packed_masks[strat_t]
+        valid_mask       = valid_mask[strat_t]
+        all_fens         = [all_fens[i] for i in strat_keep.tolist()]
+        sampled_idxs     = [sampled_idxs[i] for i in strat_keep.tolist()]
+        all_outcome_values = all_outcome_values[strat_t]
+        if all_visit_dists is not None:
+            all_visit_dists = all_visit_dists[strat_t]
+        if all_game_ids is not None:
+            all_game_ids = all_game_ids[strat_t]
+        if all_plys is not None:
+            all_plys = all_plys[strat_t]
+        if all_drawness_mask is not None:
+            all_drawness_mask = all_drawness_mask[strat_t]
+        if all_drawness_targets is not None:
+            all_drawness_targets = all_drawness_targets[strat_t]
+        if all_drawness_available is not None:
+            all_drawness_available = all_drawness_available[strat_t]
+
+        strat_vals = new_values.numpy()
+        print(f"  Post-stratify SF decisive rate: "
+              f"{(np.abs(strat_vals) > 0.5).mean()*100:.1f}%")
 
     n = len(all_fens)
     if all_drawness_mask is None:
@@ -783,6 +853,8 @@ def merge_partials(dataset_path: str,
                    max_pieces: int = 32,
                    n: int = 200_000,
                    seed: int = 42,
+                   decisive_game_fraction: float = None,
+                   n_output: int = None,
                    derive_drawness_from_outcome: bool = False,
                    drawness_sf_threshold: float = 0.15,
                    drawness_min_ply: int = 40,
@@ -904,6 +976,9 @@ def merge_partials(dataset_path: str,
         out_path=out_path,
         min_decisive=min_decisive,
         max_pieces=max_pieces,
+        seed=seed,
+        decisive_game_fraction=decisive_game_fraction,
+        n_output=n_output,
         derive_drawness_from_outcome=derive_drawness_from_outcome,
         drawness_sf_threshold=drawness_sf_threshold,
         drawness_min_ply=drawness_min_ply,
@@ -1059,6 +1134,12 @@ Modes
     ap.add_argument("--allow-partial-coverage", action="store_true",
                     help="Allow merging when not all positions are covered by partials. "
                          "Uncovered positions are excluded from the output dataset.")
+    ap.add_argument("--decisive-game-fraction", type=float, default=None,
+                    help="Stratify final dataset so this fraction of positions come from "
+                         "decisive games (game result ≠ draw). Requires --n-output. "
+                         "Uses all_outcome_values stored at parse time, not SF eval.")
+    ap.add_argument("--n-output", type=int, default=None,
+                    help="Final dataset size when using --decisive-game-fraction.")
 
     args = ap.parse_args()
 
@@ -1077,6 +1158,8 @@ Modes
             max_pieces=args.max_pieces,
             n=args.n,
             seed=args.seed,
+            decisive_game_fraction=args.decisive_game_fraction,
+            n_output=args.n_output,
             derive_drawness_from_outcome=args.derive_drawness_from_outcome,
             drawness_sf_threshold=args.drawness_sf_threshold,
             drawness_min_ply=args.drawness_min_ply,

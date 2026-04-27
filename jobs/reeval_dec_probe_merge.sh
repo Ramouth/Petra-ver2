@@ -1,39 +1,38 @@
 #!/bin/bash
-#BSUB -J reeval_dec_merge_${DEC_LEVEL:-0.0}
+#BSUB -J reeval_dec_probe_${DEC_FRAC:-0.00}
 #BSUB -q hpc
 #BSUB -n 4
-#BSUB -R "rusage[mem=16GB]"
+#BSUB -R "rusage[mem=32GB]"
 #BSUB -W 2:00
-#BSUB -o /zhome/81/b/206091/logs/reeval_dec_ablation_merge_%J.out
-#BSUB -e /zhome/81/b/206091/logs/reeval_dec_ablation_merge_%J.err
+#BSUB -o /zhome/81/b/206091/logs/reeval_dec_probe_merge_%J.out
+#BSUB -e /zhome/81/b/206091/logs/reeval_dec_probe_merge_%J.err
 
-# Merge 6 reeval chunks into one dataset at a fixed decisiveness threshold.
-# All 4 merge jobs can run in parallel once all 6 reeval chunks finish.
+# Probe experiment: vary fraction of decisive games (game result ≠ draw),
+# holding N=1M and SF labels constant. Reuses the dec_ablation reeval partials.
 #
-# DEC_LEVEL: 0.0 | 0.3 | 0.5 | 0.7
-# n is fixed at 1,000,000 across all conditions (controlled experiment).
+# DEC_FRAC: fraction of final positions from decisive games (0.00 to 1.00)
 #
-# NOTE: If fewer than 1,000,000 positions pass the filter (most likely for
-# DEC_LEVEL=0.7), this job will fail loudly. Inspect the reeval output for
-# the actual passing count and lower N uniformly across all conditions if needed.
+#   bsub -env "DEC_FRAC=0.00" < jobs/reeval_dec_probe_merge.sh
+#   bsub -env "DEC_FRAC=0.25" < jobs/reeval_dec_probe_merge.sh
+#   bsub -env "DEC_FRAC=0.50" < jobs/reeval_dec_probe_merge.sh
+#   bsub -env "DEC_FRAC=0.75" < jobs/reeval_dec_probe_merge.sh
+#   bsub -env "DEC_FRAC=1.00" < jobs/reeval_dec_probe_merge.sh
 #
-#   bsub -env "DEC_LEVEL=0.0" < jobs/reeval_dec_ablation_merge.sh
-#   bsub -env "DEC_LEVEL=0.3" < jobs/reeval_dec_ablation_merge.sh
-#   bsub -env "DEC_LEVEL=0.5" < jobs/reeval_dec_ablation_merge.sh
-#   bsub -env "DEC_LEVEL=0.7" < jobs/reeval_dec_ablation_merge.sh
+# When all 5 complete: submit train_dec_probe.sh for each DEC_FRAC.
 
-DEC_LEVEL="${DEC_LEVEL:-0.0}"
+DEC_FRAC="${DEC_FRAC:-0.50}"
 N=5000000
+N_OUTPUT=1000000
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
 IN_FILE="${BLACKHOLE}/dataset_dec_ablation_raw.pt"
-TAG="${DEC_LEVEL//./}"           # "0.3" → "03", "0.7" → "07"
-OUT_FILE="${BLACKHOLE}/dataset_dec${TAG}_sf18.pt"
+TAG="${DEC_FRAC//./}"           # "0.25" → "025", "1.00" → "100"
+OUT_FILE="${BLACKHOLE}/dataset_dec_probe_frac${TAG}_sf18.pt"
 
-echo "=== Decisiveness ablation merge: DEC_LEVEL=${DEC_LEVEL}  n=${N} ==="
+echo "=== Dec probe merge: DEC_FRAC=${DEC_FRAC}  n_output=${N_OUTPUT} ==="
 echo "In:  ${IN_FILE}"
 echo "Out: ${OUT_FILE}"
 echo
@@ -61,8 +60,10 @@ python3 -u "${SRC}/reeval_stockfish.py" \
         "${BLACKHOLE}/reeval_dec_ablation_d18_part6.pt" \
     --n                            ${N} \
     --seed                         42 \
-    --min-decisive                 ${DEC_LEVEL} \
+    --min-decisive                 0.0 \
     --max-pieces                   32 \
+    --decisive-game-fraction       ${DEC_FRAC} \
+    --n-output                     ${N_OUTPUT} \
     --derive-drawness-from-outcome \
     --drawness-game-level \
     --drawness-sf-threshold        0.11 \
@@ -71,4 +72,4 @@ python3 -u "${SRC}/reeval_stockfish.py" \
 
 echo
 echo "Done. Dataset: ${OUT_FILE}"
-echo "Next: bsub -env \"DEC_LEVEL=${DEC_LEVEL}\" < jobs/train_dec_ablation.sh"
+echo "Next: bsub -env \"DEC_FRAC=${DEC_FRAC}\" < jobs/train_dec_probe.sh"
