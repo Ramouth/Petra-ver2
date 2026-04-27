@@ -702,10 +702,43 @@ def reeval_chunk(dataset_path: str,
     print(f"  Total positions: {n_total:,}  chunk size: {chunk_sz:,}")
     print(f"  This chunk: [{start:,}, {planned_end:,})  ({planned_end-start:,} positions)")
 
-    fens_slice = state["all_fens"][start:planned_end]
+    # Resume from existing checkpoint if available.
+    already_done  = 0
+    pre_values    = None
+    pre_move_idxs = None
+    pre_masks     = None
+    pre_valid     = None
+    if os.path.exists(partial_out):
+        try:
+            prev = torch.load(partial_out, weights_only=False)
+            prev_done = prev["end"] - prev["start"]
+            if (prev["start"] == start and prev.get("n") == n and prev.get("seed") == seed
+                    and 0 < prev_done < planned_end - start):
+                already_done  = prev_done
+                pre_values    = prev["new_values"]
+                pre_move_idxs = prev["new_move_idxs"]
+                pre_masks     = prev["all_packed_masks"]
+                pre_valid     = prev["valid_mask"]
+                print(f"  Resuming from checkpoint: {already_done:,} positions already done, "
+                      f"{planned_end - start - already_done:,} remaining.")
+        except Exception as exc:
+            print(f"  WARNING: could not load existing partial ({exc}); starting fresh.")
+
+    fens_slice = state["all_fens"][start + already_done:planned_end]
 
     def _save(done_count, vals, moves, masks, valid):
-        actual_end = start + done_count
+        total_done = already_done + done_count
+        actual_end = start + total_done
+        if pre_values is not None:
+            sv = torch.cat([pre_values,    vals[:done_count].clone()])
+            sm = torch.cat([pre_move_idxs, moves[:done_count].clone()])
+            sk = torch.cat([pre_masks,     masks[:done_count].clone()])
+            sv2 = torch.cat([pre_valid,    valid[:done_count].clone()])
+        else:
+            sv  = vals[:done_count].clone()
+            sm  = moves[:done_count].clone()
+            sk  = masks[:done_count].clone()
+            sv2 = valid[:done_count].clone()
         partial = {
             "chunk_idx":        chunk_idx,
             "n_chunks":         n_chunks,
@@ -715,13 +748,13 @@ def reeval_chunk(dataset_path: str,
             "depth":            depth,
             "start":            start,
             "end":              actual_end,
-            "new_values":       vals[:done_count].clone(),
-            "new_move_idxs":    moves[:done_count].clone(),
-            "all_packed_masks": masks[:done_count].clone(),
-            "valid_mask":       valid[:done_count].clone(),
+            "new_values":       sv,
+            "new_move_idxs":    sm,
+            "all_packed_masks": sk,
+            "valid_mask":       sv2,
         }
         torch.save(partial, partial_out)
-        print(f"  Checkpoint → {partial_out}  [{start:,}, {actual_end:,})  ({done_count:,} positions)",
+        print(f"  Checkpoint → {partial_out}  [{start:,}, {actual_end:,})  ({total_done:,} positions)",
               flush=True)
 
     new_values, new_move_idxs, all_packed_masks, valid_mask, done = \
@@ -730,10 +763,11 @@ def reeval_chunk(dataset_path: str,
                          checkpoint_interval=checkpoint_interval)
 
     _save(done, new_values, new_move_idxs, all_packed_masks, valid_mask)
-    actual_end = start + done
+    total_done = already_done + done
+    actual_end = start + total_done
     print(f"\nPartial saved → {partial_out}")
-    print(f"  chunk {chunk_idx}/{n_chunks}: positions [{start:,}, {actual_end:,})  ({done:,} evaluated)")
-    if done < planned_end - start:
+    print(f"  chunk {chunk_idx}/{n_chunks}: positions [{start:,}, {actual_end:,})  ({total_done:,} evaluated)")
+    if total_done < planned_end - start:
         print(f"  WARNING: chunk incomplete — {planned_end - actual_end:,} positions not evaluated.")
         print(f"  Merge will report the missing range. Resubmit CHUNK_IDX={chunk_idx} to complete.")
 
