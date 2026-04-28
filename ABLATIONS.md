@@ -118,6 +118,68 @@ The ground truth for "balanced but not drawn" already exists in the dataset: `al
 
 ---
 
+### Probe hypothesis and predicted train.py consequences
+
+**Probe:** `probe_draw_subspace.sh` on `phase15_mid_no_endgame/best.pt` (rank 89.9).
+Check 6 generates ~450 structural draw positions (KR vs KR, KNN vs K, KB vs KB) and compares their geometry vectors against the `|v|<0.2` pool from the probe dataset.
+
+---
+
+**Hypothesis A — High accuracy (>85%), piece-count driven** *(most likely)*
+
+The CNN backbone encodes piece count directly (14-channel tensor includes piece presence per square). A 4-piece KR vs KR board looks completely different from a 16-piece Sicilian in the input tensor. The geometry likely separates them well — but for the wrong reason: it is separating *few-piece endgames* from *complex middlegames*, not *structural draws* from *sharp-balanced positions*.
+
+Evidence this is what's happening: KQ vs K (decisive, 3 pieces) would also get high drawness from a frozen head trained this way. The PC1 separating direction would correlate with piece count, not draw concept.
+
+**Consequence for train.py:** The drawness head needs explicit negatives that are also few-piece but decisive. Decisive endgames (stages 1–8 in endgame_drawness.pt: KQ vs K, KR vs K etc.) already exist in the anchor with drawness=0. The fix is to increase their frequency in the drawness batch so the head sees: few-piece decisive (target=0) AND few-piece structural draw (target=1) AND many-piece balanced (target=0). No new data needed — just anchor mix adjustment.
+
+---
+
+**Hypothesis B — High accuracy (>85%), genuine drawness** *(possible)*
+
+The W·D cosine of −0.1067 at rank 89.9 means the draw cluster is already partially orthogonal to the win/loss axis. Structural draws (oscillatory, no-progress dynamics) may cluster in a distinct region from balanced middlegame positions even among the `|v|<0.2` pool. The logistic regression finds a real drawness hyperplane.
+
+Evidence this is what's happening: KQ vs K (decisive few-piece) and KR vs KR (structural draw few-piece) would project to opposite sides of the separating direction.
+
+**Consequence for train.py:** The backbone is already correct. Only the drawness head needs to find this hyperplane. Minimal fix: initialize `model.drawness_head.weight` to the logistic regression coefficient vector from the probe. Then freeze backbone, train 2 epochs on the existing anchor. The head starts already aligned with the correct direction instead of random init.
+
+```python
+# New utility: init drawness head from probe separating direction
+w_probe = np.load("probe_draw_axis.npy")        # saved by probe
+model.drawness_head.weight.data = torch.tensor(w_probe).unsqueeze(0)
+```
+
+---
+
+**Hypothesis C — Low accuracy (~50%)** *(possible if W·D cosine −0.1067 is insufficient)*
+
+The rank-89.9 geometry maps structural draws and sharp balanced positions to the same geometric region. The draw cluster exists globally (W·D cosine −0.1067) but the `|v|<0.2` subspace is not internally differentiated — structural draws and sharp balanced are neighbours.
+
+Evidence this is what's happening: centroid cosine between group A and group B close to 1.0, Cohen's d on PC1 < 0.3.
+
+**Consequence for train.py:** The backbone must change. The minimal targeted fix is extending the `draw_neg` mask in the BCE loss to include balanced-but-decisive positions — filling the supervision gap directly.
+
+Currently (train.py line 466):
+```python
+draw_neg = values.abs() > 0.5
+```
+
+Proposed change — add `outcome_values` to the batch and extend the negative mask:
+```python
+draw_neg_decisive  = values.abs() > 0.5
+draw_neg_balanced  = (outcome_values.abs() > 0.5) & (values.abs() < 0.2)
+draw_neg           = draw_neg_decisive | draw_neg_balanced
+```
+
+Where `outcome_values` is the game outcome (±1 for decisive, 0 for draw) stored in the dataset but currently not passed to the training loop at all. This requires:
+1. Add `outcome_values` to the collated batch in `train.py` (currently absent from the batch entirely — only used in data filtering)
+2. Change the `draw_neg` mask as above
+3. Run with unfrozen backbone so the geometry can adapt (the gap has been there throughout all prior training)
+
+This is the most invasive path but also the most principled — it directly supervises the distinction between "equal-looking but game was decisive" (balanced) and "equal-looking and game was drawn" (candidate structural draw).
+
+---
+
 ### Experiment 2 — Outcome-based negatives: freeze backbone, fix the supervision gap
 
 **Question:** Does the rank-21.6 geometry (lichess_2023_03_endgame) already separate KR vs KR from sharp balanced — we just need to tell the drawness head what sharp balanced should score?
