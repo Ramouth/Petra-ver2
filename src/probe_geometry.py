@@ -390,7 +390,249 @@ def check_nearest_neighbours(vecs: np.ndarray, values: np.ndarray, k: int = 5, n
 
 
 # ---------------------------------------------------------------------------
-# Check 6: Topological health
+# Check 6: Equal-region subspace — structural draws vs balanced
+# ---------------------------------------------------------------------------
+
+def _gen_structural_draws(n_per_type: int = 150, seed: int = 42):
+    """
+    Generate valid structural draw positions: KR vs KR, KNN vs K, KB vs KB
+    (same-colour bishops). Returns list of (label, chess.Board).
+    """
+    rng = np.random.default_rng(seed)
+    positions = []
+    all_sq = list(range(64))
+
+    def _sq_color(sq):
+        return (chess.square_file(sq) + chess.square_rank(sq)) % 2
+
+    def _try_board(piece_map, turn):
+        board = chess.Board(fen=None)
+        board.clear()
+        for sq, pc in piece_map.items():
+            board.set_piece_at(sq, pc)
+        board.turn = chess.WHITE if turn else chess.BLACK
+        try:
+            return board if board.is_valid() else None
+        except Exception:
+            return None
+
+    # KR vs KR
+    attempts = 0
+    while sum(1 for n, _ in positions if n == "KRvKR") < n_per_type and attempts < 20000:
+        attempts += 1
+        sq = rng.choice(all_sq, 4, replace=False).tolist()
+        wk, bk, wr, br = sq
+        if chess.square_distance(wk, bk) <= 1:
+            continue
+        board = _try_board({
+            wk: chess.Piece(chess.KING,  chess.WHITE),
+            bk: chess.Piece(chess.KING,  chess.BLACK),
+            wr: chess.Piece(chess.ROOK,  chess.WHITE),
+            br: chess.Piece(chess.ROOK,  chess.BLACK),
+        }, rng.random() < 0.5)
+        if board is not None:
+            positions.append(("KRvKR", board))
+
+    # KNN vs K  (two white knights vs lone black king — theoretical draw)
+    attempts = 0
+    while sum(1 for n, _ in positions if n == "KNNvK") < n_per_type and attempts < 20000:
+        attempts += 1
+        sq = rng.choice(all_sq, 4, replace=False).tolist()
+        wk, bk, wn1, wn2 = sq
+        if chess.square_distance(wk, bk) <= 1:
+            continue
+        board = _try_board({
+            wk:  chess.Piece(chess.KING,   chess.WHITE),
+            bk:  chess.Piece(chess.KING,   chess.BLACK),
+            wn1: chess.Piece(chess.KNIGHT, chess.WHITE),
+            wn2: chess.Piece(chess.KNIGHT, chess.WHITE),
+        }, rng.random() < 0.5)
+        if board is not None:
+            positions.append(("KNNvK", board))
+
+    # KB vs KB  (same-colour bishops — draw)
+    attempts = 0
+    while sum(1 for n, _ in positions if n == "KBvKB") < n_per_type and attempts < 20000:
+        attempts += 1
+        sq = rng.choice(all_sq, 4, replace=False).tolist()
+        wk, bk, wb, bb = sq
+        if chess.square_distance(wk, bk) <= 1:
+            continue
+        if _sq_color(wb) != _sq_color(bb):   # must be same colour
+            continue
+        board = _try_board({
+            wk: chess.Piece(chess.KING,   chess.WHITE),
+            bk: chess.Piece(chess.KING,   chess.BLACK),
+            wb: chess.Piece(chess.BISHOP, chess.WHITE),
+            bb: chess.Piece(chess.BISHOP, chess.BLACK),
+        }, rng.random() < 0.5)
+        if board is not None:
+            positions.append(("KBvKB", board))
+
+    return positions
+
+
+def check_equal_subspace(model: PetraNet, vecs: np.ndarray, values: np.ndarray,
+                         dataset_path: str):
+    """
+    Ask whether the |v|<0.2 region already geometrically separates structural
+    draws from balanced positions.
+
+    Group A — structural draws : generated KR vs KR, KNN vs K, KB vs KB.
+    Group B — equal region     : probe dataset positions with |v|<0.2.
+                                 Split by outcome_values if available:
+                                 decisive-game positions are the sharpest
+                                 negatives (equal-looking but proved not drawn).
+
+    Outcome guide
+    -------------
+    accuracy > 85% : geometry already separates them. Frozen-backbone
+                     drawness head can read it out — no backbone training needed.
+    accuracy 60-85%: weak separation. Small contrastive training may suffice.
+    accuracy ~50%  : no separation. Backbone geometry must change first.
+    """
+    print("\n" + "="*60)
+    print("CHECK 6 — Equal-region subspace: structural draws vs balanced")
+    print("="*60)
+    print("  Question: does the |v|<0.2 geometry already separate")
+    print("  KR vs KR / KNN vs K / KB vs KB from balanced positions?")
+
+    # --- Group A: structural draw positions ---------------------------------
+    draw_positions = _gen_structural_draws(n_per_type=150)
+    if not draw_positions:
+        print("  SKIPPED — could not generate structural draw positions")
+        return
+
+    model.eval()
+    draw_vecs = []
+    with torch.no_grad():
+        for _, board in draw_positions:
+            t = board_to_tensor(board).unsqueeze(0).to(device)
+            g = model.geometry(t).cpu().numpy()[0]
+            draw_vecs.append(g)
+    draw_vecs = np.array(draw_vecs)
+
+    type_counts = {}
+    for name, _ in draw_positions:
+        type_counts[name] = type_counts.get(name, 0) + 1
+    type_str = "  ".join(f"{k}={v}" for k, v in sorted(type_counts.items()))
+
+    # --- Group B: equal-region positions from dataset -----------------------
+    eq_mask = np.abs(values) < 0.2
+    eq_vecs_all = vecs[eq_mask]
+
+    # Try to load outcome_values to separate draw-game from decisive-game
+    outcome_values = None
+    try:
+        data = torch.load(dataset_path, map_location="cpu", weights_only=False)
+        split = data["val"]
+        if "outcome_values" in split:
+            ov = split["outcome_values"][:len(values)].numpy()
+            outcome_values = ov[eq_mask]
+    except Exception:
+        pass
+
+    if outcome_values is not None:
+        dec_mask  = np.abs(outcome_values) > 0.5
+        eq_dec    = eq_vecs_all[dec_mask]   # equal-looking, game was decisive
+        eq_draw   = eq_vecs_all[~dec_mask]  # equal-looking, game was drawn
+        print(f"\n  Group A — structural draws : {len(draw_vecs)} ({type_str})")
+        print(f"  Group B — equal region     : {len(eq_vecs_all)} positions (|v|<0.2)")
+        print(f"    of which decisive-game   : {len(eq_dec)}  ← sharpest negatives")
+        print(f"    of which drawn-game      : {len(eq_draw)}")
+        # Use decisive-game subset as the primary comparison if large enough
+        eq_vecs = eq_dec if len(eq_dec) >= 50 else eq_vecs_all
+        neg_label = "equal+decisive" if len(eq_dec) >= 50 else "equal (all)"
+    else:
+        eq_vecs   = eq_vecs_all
+        neg_label = "equal (all)"
+        print(f"\n  Group A — structural draws : {len(draw_vecs)} ({type_str})")
+        print(f"  Group B — {neg_label:<18}: {len(eq_vecs)} positions (|v|<0.2)")
+        print(f"  (outcome_values not in dataset — cannot split by game outcome)")
+
+    if len(eq_vecs) < 20:
+        print("  SKIPPED — too few equal-region positions in dataset")
+        return
+
+    # --- Centroid separation ------------------------------------------------
+    c_draw  = draw_vecs.mean(axis=0)
+    c_equal = eq_vecs.mean(axis=0)
+    centroid_cos  = cosine_sim(c_draw, c_equal)
+    between_dist  = float(np.linalg.norm(c_draw - c_equal))
+    draw_spread   = float(np.linalg.norm(draw_vecs  - c_draw,  axis=1).mean())
+    equal_spread  = float(np.linalg.norm(eq_vecs    - c_equal, axis=1).mean())
+
+    print(f"\n  Centroid cosine (structural vs {neg_label}): {centroid_cos:+.4f}")
+    print(f"  Between-centroid L2 distance              : {between_dist:.3f}")
+    print(f"  Within-group spread  — structural {draw_spread:.3f}  "
+          f"{neg_label} {equal_spread:.3f}")
+
+    # --- PCA of the combined equal region -----------------------------------
+    all_eq = np.vstack([draw_vecs, eq_vecs])
+    centred = all_eq - all_eq.mean(axis=0)
+    cov = np.cov(centred.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+
+    pc1 = eigvecs[:, 0]
+    pc2 = eigvecs[:, 1]
+    d1, e1 = draw_vecs @ pc1, eq_vecs @ pc1
+    d2, e2 = draw_vecs @ pc2, eq_vecs @ pc2
+    var1 = 100 * eigvals[0] / (eigvals.sum() + 1e-8)
+    var2 = 100 * eigvals[1] / (eigvals.sum() + 1e-8)
+    sep_d = abs(d1.mean() - e1.mean()) / ((d1.std() + e1.std()) / 2 + 1e-8)
+
+    print(f"\n  PCA of combined equal-region:")
+    print(f"    PC1 {var1:.1f}%  PC2 {var2:.1f}% of variance")
+    print(f"    PC1 projection — structural: {d1.mean():+.3f}±{d1.std():.3f}"
+          f"  {neg_label}: {e1.mean():+.3f}±{e1.std():.3f}")
+    print(f"    PC2 projection — structural: {d2.mean():+.3f}±{d2.std():.3f}"
+          f"  {neg_label}: {e2.mean():+.3f}±{e2.std():.3f}")
+    print(f"    Cohen's d on PC1: {sep_d:.3f}  (>1.0 = well separated along PC1)")
+
+    # --- Linear separability ------------------------------------------------
+    rng = np.random.default_rng(42)
+    n_use = min(len(draw_vecs), len(eq_vecs), 250)
+    A = draw_vecs[rng.choice(len(draw_vecs), n_use, replace=False)]
+    B = eq_vecs[rng.choice(len(eq_vecs),     n_use, replace=False)]
+    X = np.vstack([A, B]).astype(np.float32)
+    y = np.array([1] * n_use + [0] * n_use)
+
+    try:
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import cross_val_score
+        clf   = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
+        cv_scores = cross_val_score(clf, X, y, cv=5, scoring="accuracy")
+        acc   = float(cv_scores.mean())
+        print(f"\n  Logistic regression (5-fold CV, n={2*n_use}): {acc:.3f}")
+
+        clf.fit(X, y)
+        w_norm = clf.coef_[0] / (np.linalg.norm(clf.coef_[0]) + 1e-8)
+        top5   = np.argsort(np.abs(w_norm))[-5:][::-1]
+        print(f"  Top-5 separating dims: {top5.tolist()}")
+
+    except ImportError:
+        # Nearest-centroid fallback
+        correct = sum(
+            np.linalg.norm(v - c_draw) < np.linalg.norm(v - c_equal) for v in A
+        ) + sum(
+            np.linalg.norm(v - c_equal) < np.linalg.norm(v - c_draw) for v in B
+        )
+        acc = correct / (2 * n_use)
+        print(f"\n  Nearest-centroid accuracy (sklearn absent): {acc:.3f}")
+
+    print()
+    if acc > 0.85:
+        print("  SEPARABLE   — frozen backbone drawness head should work.")
+    elif acc > 0.60:
+        print("  WEAK        — partial separation; contrastive training may help.")
+    else:
+        print("  NOT SEPARABLE — backbone must change before drawness head can learn.")
+
+
+# ---------------------------------------------------------------------------
+# Check 7: Topological health
 # ---------------------------------------------------------------------------
 
 def check_topology(model: PetraNet, val_loader, n_sample: int = 300):
@@ -444,6 +686,7 @@ def main():
     check_known_positions(model, c_win, c_loss)
     check_drawness(model)
     check_nearest_neighbours(vecs, values)
+    check_equal_subspace(model, vecs, values, args.dataset)
 
     # Build a minimal val_loader for the topology check
     from torch.utils.data import DataLoader, TensorDataset
