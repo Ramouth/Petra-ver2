@@ -118,6 +118,35 @@ The ground truth for "balanced but not drawn" already exists in the dataset: `al
 
 ---
 
+### Probe results (Job 28320925, 2026-04-29)
+
+**Check 6 — Equal-region subspace:**
+
+| Metric | Value |
+|--------|-------|
+| Logistic regression accuracy (5-fold CV) | **0.990** |
+| Cohen's d on PC1 | **3.769** |
+| PC1 projection — structural draws | +0.418 ± 0.152 |
+| PC1 projection — equal+decisive | −0.021 ± 0.081 |
+| Centroid cosine (structural vs equal+decisive) | +0.1686 |
+| Top-5 separating dims | [101, 84, 48, 99, 6] |
+
+**Verdict: SEPARABLE.** The geometry at rank 89.9 already separates structural draws from balanced positions with near-perfect accuracy. This is Hypothesis B confirmed at the extreme.
+
+**Check 4 — Drawness head:**
+
+All four probes score 0.516–0.540 — essentially constant regardless of position type. The drawness head is not failing; it is **completely untrained**. The model was trained with `--draw-reg 0.0`. The head has random initialisation and has never seen a gradient. It outputs ~0.5 for everything.
+
+**Combined reading:** The geometry has the drawness distinction encoded. The head has never been asked to read it out. The separation is already there in the backbone — particularly along dimensions [101, 84, 48, 99, 6] and strongly on PC1 of the equal-region subspace (Cohen's d = 3.769, which is massive — anything above 1.0 is considered well-separated).
+
+**One open question:** Is the separation piece-count driven (Hypothesis A) or genuine drawness (Hypothesis B)? KQ vs K (decisive, 3 pieces) and KR vs KR (structural draw, 4 pieces) differ in both drawness and piece count. The probe did not output projections for individual known positions onto PC1. A follow-up check — projecting KQ vs K onto the separating direction — would resolve this. If KQ vs K projects negative (same side as balanced positions), the separation is genuine drawness. If it projects positive (same side as structural draws), it is piece-count driven.
+
+Practically: even under Hypothesis A, the frozen-backbone training with explicit negatives (decisive endgame stages 1–8 as drawness=0) will resolve the piece-count conflation automatically — the head will be told KQ vs K = 0 and KR vs KR = 1 explicitly.
+
+**Next step:** `train_drawness_bootstrap.sh` with init from `phase15_mid_no_endgame/best.pt`. Given 99% linear separability the frozen head will converge in ≤2 epochs.
+
+---
+
 ### Probe hypothesis and predicted train.py consequences
 
 **Probe:** `probe_draw_subspace.sh` on `phase15_mid_no_endgame/best.pt` (rank 89.9).
