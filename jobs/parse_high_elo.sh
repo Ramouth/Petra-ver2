@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 #BSUB -J parse_high_elo
 #BSUB -q hpc
 #BSUB -n 1

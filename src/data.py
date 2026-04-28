@@ -771,7 +771,7 @@ def main():
                 "plys":        dataset.plys,
                 "n_positions": len(dataset.fens),
             }
-            torch.save(raw_out, args.out)
+            torch.save(raw_out, args.out, pickle_protocol=4)
             print(f"Saved raw (no split) → {args.out}")
         else:
             split_and_save(dataset, args.out, seed=args.seed,
