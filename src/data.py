@@ -758,8 +758,6 @@ def main():
         print("No positions extracted. Check PGN path and filters.")
         sys.exit(1)
 
-    validate_dataset(dataset, strict=not args.no_strict)
-
     if not args.validate_only:
         if args.no_split:
             raw_out = {
@@ -778,6 +776,8 @@ def main():
                            skip_opening=args.skip_opening,
                            positions_per_game=args.positions_per_game,
                            sampling=args.sampling)
+
+    validate_dataset(dataset, strict=not args.no_strict)
 
 
 if __name__ == "__main__":
