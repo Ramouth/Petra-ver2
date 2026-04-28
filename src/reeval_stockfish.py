@@ -249,33 +249,55 @@ def _load_and_sample(dataset_path: str, n: int, seed: int):
     import random as _random
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
 
-    train_d      = data["train"]
-    val_d        = data["val"]
-    n_train_orig = len(train_d["tensors"])
+    def _to_tensor(x):
+        import numpy as np
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
 
-    all_tensors = torch.cat([train_d["tensors"],  val_d["tensors"]],  dim=0)
-    all_fens    = train_d["fens"] + val_d["fens"]
-    all_moves   = torch.cat([train_d["move_idxs"], val_d["move_idxs"]], dim=0)
+    if "train" in data:
+        train_d      = data["train"]
+        val_d        = data["val"]
+        n_train_orig = len(train_d["tensors"])
 
-    def _cat_optional(name):
-        if name in train_d and name in val_d:
-            return torch.cat([train_d[name], val_d[name]], dim=0)
-        return None
+        all_tensors = torch.cat([train_d["tensors"],  val_d["tensors"]],  dim=0)
+        all_fens    = train_d["fens"] + val_d["fens"]
+        all_moves   = torch.cat([train_d["move_idxs"], val_d["move_idxs"]], dim=0)
 
-    all_outcome_values = _cat_optional("outcome_values")
-    all_game_ids       = _cat_optional("game_ids")
-    all_plys           = _cat_optional("plys")
-    all_drawness_mask  = _cat_optional("drawness_mask")
-    all_drawness_targets = _cat_optional("drawness_targets")
-    all_drawness_available = _cat_optional("drawness_available")
+        def _cat_optional(name):
+            if name in train_d and name in val_d:
+                return torch.cat([train_d[name], val_d[name]], dim=0)
+            return None
 
-    has_vd = "visit_dists" in train_d
-    if has_vd:
-        all_visit_dists = torch.cat([train_d["visit_dists"], val_d["visit_dists"]], dim=0)
+        all_outcome_values     = _cat_optional("outcome_values")
+        all_game_ids           = _cat_optional("game_ids")
+        all_plys               = _cat_optional("plys")
+        all_drawness_mask      = _cat_optional("drawness_mask")
+        all_drawness_targets   = _cat_optional("drawness_targets")
+        all_drawness_available = _cat_optional("drawness_available")
+
+        has_vd = "visit_dists" in train_d
+        if has_vd:
+            all_visit_dists = torch.cat([train_d["visit_dists"], val_d["visit_dists"]], dim=0)
+        else:
+            all_visit_dists = None
+
+        del data, train_d, val_d
     else:
-        all_visit_dists = None
-
-    del data, train_d, val_d
+        # raw (--no-split) format: flat dict with tensors/values/move_idxs/fens/game_ids/plys
+        all_tensors        = _to_tensor(data["tensors"]).float()
+        all_fens           = data["fens"]
+        all_moves          = _to_tensor(data["move_idxs"]).long()
+        all_outcome_values = _to_tensor(data["values"])
+        all_game_ids       = _to_tensor(data["game_ids"]) if "game_ids" in data else None
+        all_plys           = _to_tensor(data["plys"])     if "plys"     in data else None
+        all_visit_dists    = None
+        all_drawness_mask  = None
+        all_drawness_targets   = None
+        all_drawness_available = None
+        n_train_orig       = len(all_fens)
+        has_vd             = False
+        del data
     import gc; gc.collect()
 
     total = len(all_fens)
