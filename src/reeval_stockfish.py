@@ -285,7 +285,7 @@ def _load_and_sample(dataset_path: str, n: int, seed: int):
         del data, train_d, val_d
     else:
         # raw (--no-split) format: flat dict with tensors/values/move_idxs/fens/game_ids/plys
-        all_tensors        = _to_tensor(data["tensors"]).float()
+        all_tensors        = _to_tensor(data["tensors"])
         all_fens           = data["fens"]
         all_moves          = _to_tensor(data["move_idxs"]).long()
         all_outcome_values = _to_tensor(data["values"])
