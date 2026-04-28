@@ -19,28 +19,22 @@ module load cuda/12.1
 # explicit drawness_target labels emitted by generate_endgame.py.
 #
 # Strategy: freeze the backbone and train only the drawness_head (129 params)
-# on frozen geometry from lichess_2023_03_endgame (rank 21.6, first KR vs KR pass).
+# on frozen geometry from phase15_mid_no_endgame (rank 89.9).
 #
-# Previous attempt (job 28258816) showed the drawness head converges in 1 epoch
-# (gap=+0.956) but rank collapsed 21.6→14.3 due to endgame value gradient reshaping
-# the geometry.  --freeze-backbone eliminates that regression entirely: only the
-# 129-parameter linear head is updated.
-#
-# policy_weight=0 avoids allocating visit_dists (~16 GB) for positions that will
-# never use them (train.py skips storage when policy_weight=0).
+# Probe (job 28320925) confirmed: the rank-89.9 geometry separates structural
+# draws from balanced positions at 99% logistic regression accuracy, Cohen's d=3.769.
+# The drawness head is simply untrained (constant ~0.53 output, --draw-reg 0.0
+# during phase15 training). The hyperplane is already in the geometry.
+# --freeze-backbone guarantees rank stays at 89.9.
 #
 # Success gate (run probe_geometry.sh after training):
 #   - drawness sanity: KR vs KR > 0.7, Sicilian < 0.3
-#   - Effective rank unchanged from init (21.6) — guaranteed by frozen backbone
-#   - All value sign checks pass (value head frozen, should be identical)
-#
-# After this job: run broad SF/Lichess training with --init-model pointing here
-# and a small --draw-reg to keep the drawness head anchored as geometry broadens.
+#   - Effective rank unchanged from init (89.9) — guaranteed by frozen backbone
 
 python3 -u /zhome/81/b/206091/Petra-ver2/src/train.py \
     --endgame-positions 250000 \
     --endgame-stages    1 2 4 5 9 10 11 \
-    --init-model   /zhome/81/b/206091/Petra-ver2/models/lichess_2023_03_endgame/best.pt \
+    --init-model   /zhome/81/b/206091/Petra-ver2/models/phase15_mid_no_endgame/best.pt \
     --out          /zhome/81/b/206091/Petra-ver2/models/drawness_bootstrap \
     --draw-reg     0.05 \
     --policy-weight 0.0 \
