@@ -3,7 +3,7 @@ set -e
 #BSUB -J parse_high_elo
 #BSUB -q hpc
 #BSUB -n 1
-#BSUB -R "rusage[mem=16GB]"
+#BSUB -R "rusage[mem=32GB]"
 #BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/parse_high_elo_%J.out
 #BSUB -e /zhome/81/b/206091/logs/parse_high_elo_%J.err
