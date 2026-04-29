@@ -63,6 +63,7 @@ import argparse
 import math
 import multiprocessing
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -87,6 +88,7 @@ class Stockfish:
     """
 
     def __init__(self, path: str = "/usr/games/stockfish", depth: int = 10, threads: int = 1):
+        self._path = path
         self.depth = depth
         self._proc = subprocess.Popen(
             [path],
@@ -106,9 +108,16 @@ class Stockfish:
         self._proc.stdin.write(cmd + "\n")
         self._proc.stdin.flush()
 
-    def _wait_for(self, token: str) -> list:
+    def _wait_for(self, token: str, timeout: float = 60.0) -> list:
         lines = []
         while True:
+            ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+            if not ready:
+                self._proc.kill()
+                self._proc.wait()
+                raise RuntimeError(
+                    f"Stockfish timed out after {timeout}s waiting for {token!r}."
+                )
             line = self._proc.stdout.readline()
             if not line:  # EOF — process died
                 stderr = self._proc.stderr.read()
@@ -193,8 +202,11 @@ def _init_worker(sf_path: str, depth: int):
     _worker_sf = Stockfish(path=sf_path, depth=depth, threads=1)
 
 def _eval_one(args):
+    global _worker_sf
     idx, fen = args
     try:
+        if _worker_sf._proc.poll() is not None:
+            _worker_sf = Stockfish(path=_worker_sf._path, depth=_worker_sf.depth, threads=1)
         val, bestmove_uci = _worker_sf.evaluate(fen)
         board = chess.Board(fen)
         flip = (board.turn == chess.BLACK)
