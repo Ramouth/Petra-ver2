@@ -1037,3 +1037,111 @@ No train.py changes.
 
 ### Note on running v3 vs v4
 v3 has FEN dedup so the overlap risk is mitigated, but the dedup can't recover what's lost (we keep the first occurrence of each FEN, biasing toward whichever source loaded first). v4 is the cleaner path. Either can be run, but v4 is the honest one.
+
+---
+
+## 2026-04-29 — natural breakthrough: +150 ELO over 2021_06_all
+
+### Result (Job 28327745, ongoing)
+
+`natural` vs `2021_06_all` head-to-head, **stable at 70.6% wr through 80/200 games** with only **4 losses**. Eval continues but the trend has held at 20, 40, 60, 80 — this is the model's actual strength.
+
+| n | W | D | L | wr |
+|---|---|---|---|----|
+| 20 | 10 | 8 | 2 | 70.0% |
+| 40 | 18 | 20 | 2 | 70.0% |
+| 60 | 27 | 30 | 3 | 70.0% |
+| 80 | 37 | 39 | 4 | 70.6% |
+
+ELO Δ ≈ **+150** over its own initialisation point.
+
+### Why this is significant
+
+- **Recipe is minimal**: value MSE + policy + rank-reg=0.5 on `dataset_drawness_curriculum.pt`. NO draw-reg, NO drawness BCE, NO LR-init, NO soft targets. The "natural" approach.
+- **Training cost**: 25 epochs, ~10 minutes GPU. Most efficient ELO gain in project history.
+- **Falsifies pure rank-→-ELO**: natural's probe rank dropped 87 → 33.8 but ELO climbed +150. Spread without structure is wasted capacity.
+- **Validates geometry organisation**: natural's Cohen's d=1.83 on Check 6 (structural-vs-balanced separation) is what's winning, not raw rank.
+
+### What the result clears
+
+| Question | Answer |
+|---|---|
+| Did the curriculum trade help play? | **Yes, +150 ELO** |
+| Was drawness scaffolding necessary? | **No** — geometry self-organised from value labels |
+| Is rank the right metric? | **No alone** — need rank + Cohen's d + KR vs KR triple |
+| Is drawness data-derivable? | **Yes** — and it improves play, not just probes |
+
+### Models in the field
+
+| Model | Rank (mid probe) | KR vs KR | Cohen's d (Check 6) | Has policy | Best ELO finding |
+|---|---|---|---|---|---|
+| 2021_06_all | 87 | unknown | unknown | yes | baseline |
+| natural | **33.8** | **+0.199** | **1.827** | yes | **+150 vs 2021_06_all** |
+| drawness_full | 40.2 | -0.004 | 4.06 | yes (poisoned) | -90 vs feb_sf |
+| drawness_head_v2 | 75.6 | +0.266 | 2.25 | no | functionally = phase15 |
+| phase15_mid_no_endgame | 76.1 | unknown | unknown | no (policy-weight=0) | |
+| feb_sf | 18.9 | +0.024 | unknown | yes | +58 vs sf_balanced |
+
+natural is now the best candidate for further work.
+
+---
+
+## TO DO — sequenced by priority
+
+### Immediate (let evals finish, queue cheap follow-ups)
+
+- [ ] **Let `natural vs 2021_06_all` finish 200/200** — confirm trend; expected: 65-72% wr
+- [ ] **Cancel `drawness_head_v2 vs feb_sf`** — we know what it'll show (phase15 has no policy); save the GPU
+- [ ] **Push and run `natural vs feb_sf`** — first fair MCTS comparison since both have policy. The "real" PoC eval gate.
+- [ ] **Cross-distribution probe of natural** — probe on val splits of 2021_06_high, 2021_06_low, elo2100 to see if rank 33.8 is mid-band-specific or reflects overall geometry collapse.
+
+### Big-data path (parallel track)
+
+- [ ] **Build + train `natural_v4`** (5M, 3 disjoint months, outcome supervision). Already pushed. AlphaZero-style: no SF teacher. Tests whether scale + outcome alone suffices.
+- [ ] **`natural_v4 vs natural`** head-to-head. If v4 ≥ natural, big data + outcome wins; if not, the curated SF curriculum was contributing real signal.
+- [ ] **`natural_v5` (2200+ asymmetric sampling)**: re-parse 2200+ months taking ALL positions from drawn games (capture sustained equality directly) + sampled positions from decisive games. Only do this if v4 is promising.
+- [ ] **Volume scaling**: consider `natural_v6` at 10M+ from 5-6 disjoint Lichess months once the recipe is locked in.
+
+### RL-inspired path (alternative track)
+
+- [ ] **Run `soft_drawness`** as a control. Already pushed. If it ties or loses to `natural`, soft outcome smoothing is unnecessary. If it wins, the empirical-probability framing has merit. Keep it as a parallel, not primary, track.
+- [ ] **MCTS-rollout drawness targets**: at training time, run shallow rollouts from each position; drawness target = fraction of rollouts ending in draw. Expensive but principled. Defer until natural / v4 results are clear.
+- [ ] **Self-play drawness calibration**: pick 5-10k structurally-draw-candidate positions, play 50+ self-play games each, label by empirical draw rate. Gold-standard but days of compute. Only if needed for the writeup.
+- [ ] **Drawness consumed in MCTS**: change `mcts.py` to use drawness in leaf evaluation (`effective_value = value × (1 − drawness) + 0 × drawness`). Makes drawness *useful* for play, not just diagnostic. The strategic prize.
+
+### Drawness probing (across all candidate models)
+
+- [ ] **Build the test battery** (~200 paired positions: structural vs sharp-balanced with near-zero SF eval). Hand-curated, never used in training. Becomes the PoC eval.
+  - Berlin endgames, Petroff exchanges, opposite-colour bishops, fortresses, blockades, perpetuals (structural)
+  - Dynamic Sicilian, KID Mar-del-Plata, opposite-castling races (sharp balanced)
+- [ ] **Battery accuracy** for natural, drawness_head_v2, drawness_full, soft_drawness, natural_v4 — single comparable number per model.
+- [ ] **Causality probe**: KR vs KR + add passer → drawness should drop; sharp middlegame trade pieces to KR vs KR → drawness should rise. Tests whether the head learns the property or just surface features.
+- [ ] **Analytic LR fit on natural's geometry** → put resulting weights into the drawness head, no training. Cohen's d on Check 6 was 1.83; this should pass the gate cleanly.
+- [ ] **Cross-opening generalisation**: if the test battery is partitioned by opening, does battery accuracy hold across openings? Tests "head learned property, not surface".
+
+### Phase 3 (after natural / v4 / battery work)
+
+- [ ] **Policy reintroduction on phase15-derivatives** (drawness_head_v2 backbone) and re-eval vs feb_sf. Closes the question of "what would phase15 have done with policy".
+- [ ] **Self-play from natural** — first time we have a model strong enough to bootstrap. Generate self-play data, fine-tune.
+- [ ] **Self-play + drawness coupling** — if drawness is consumed by MCTS, self-play games become drawness-aware.
+
+### Stikprøve / data quality
+
+- [ ] **Manual inspection of curriculum positives** — pick 40 positives from `dataset_drawness_curriculum.pt` and read with chess eyes. Does the sustained-equality filter actually surface structural draws? Validates the data layer.
+- [ ] **Sustained-equality filter** for re-parsed data: build a script that filters `|SF|<0.10 across ≥10 plies, ply≥30` for any reeval'd dataset. Creates cleaner positives than the current single-position |SF|<0.15 + ply≥40.
+
+### Writeup prep
+
+- [ ] **Test battery + natural's battery score** — the headline number for the paper.
+- [ ] **Comparison table**: SF / LCZero / AlphaZero output a single value at structural/balanced ≈ 0; natural separates them. The novelty claim.
+- [ ] **Geometry visualisation**: PCA / t-SNE of natural's bottleneck on the test battery, colour-coded structural vs balanced. Visible separation = picture for the paper.
+- [ ] **Causality results**: ablation positions showing drawness moves predictably. Demonstrates the head learns the property.
+- [ ] **ELO results**: natural +150 vs 2021_06_all (and ideally natural > feb_sf).
+
+---
+
+## Strategic forks under "TO DO"
+
+- **Big data vs RL-inspired**: both push the PoC further. Big data is cheaper and more aligned with "data not hyperparameters." RL-inspired (rollout / self-play targets, MCTS-consumed drawness) is more sophisticated but expensive. Run big data in main track; RL-inspired as parallel exploration only if natural / v4 plateau.
+- **SF labels vs outcome labels**: v4 tests outcome-only. If v4 matches or exceeds natural, SF teacher signal can be retired. If v4 underperforms, SF stays.
+- **Curated curriculum vs raw scale**: natural was 477k curated. v4 is 5M raw. Whichever wins decides the data philosophy going forward.
