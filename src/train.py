@@ -347,6 +347,70 @@ class _IndexedSplitDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# Drawness head initialisation from logistic regression
+# ---------------------------------------------------------------------------
+
+def _init_drawness_from_lr(model: "PetraNet", data: dict, device) -> None:
+    """
+    Fit a logistic regression on geometry vectors from the training split and
+    copy the resulting weights into the drawness head.
+
+    The frozen backbone already contains a linear draw direction (probe Cohen's d
+    ~2.3, LR accuracy ~0.97) but random head init wastes epochs searching for it.
+    This seeds the head at the LR solution so frozen training starts near convergence.
+    """
+    try:
+        from sklearn.linear_model import LogisticRegression
+    except ImportError:
+        print("  WARNING: sklearn not found — skipping LR drawness init")
+        return
+
+    d = data["train"]
+    draw_mask, draw_targets, _ = _drawness_fields(d)
+
+    pos_mask = draw_mask & (draw_targets > 0.5)
+    neg_mask = d["values"].abs() > 0.5
+
+    pos_idx = pos_mask.nonzero(as_tuple=True)[0]
+    neg_idx = neg_mask.nonzero(as_tuple=True)[0]
+
+    n_pos = min(len(pos_idx), 1500)
+    n_neg = min(len(neg_idx), 1500)
+
+    if n_pos < 10:
+        print("  WARNING: too few draw positives for LR init — skipping")
+        return
+
+    pos_idx = pos_idx[torch.randperm(len(pos_idx))[:n_pos]]
+    neg_idx = neg_idx[torch.randperm(len(neg_idx))[:n_neg]]
+    all_idx = torch.cat([pos_idx, neg_idx])
+    labels  = np.concatenate([np.ones(n_pos), np.zeros(n_neg)])
+
+    model.eval()
+    with torch.no_grad():
+        batch_size = 256
+        vecs = []
+        for i in range(0, len(all_idx), batch_size):
+            t = d["tensors"][all_idx[i:i + batch_size]].float().to(device)
+            vecs.append(model.geometry(t).cpu().numpy())
+    vecs = np.concatenate(vecs, axis=0)
+
+    clf = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
+    clf.fit(vecs, labels)
+    acc = clf.score(vecs, labels)
+
+    w = torch.tensor(clf.coef_,      dtype=torch.float32)   # (1, 128)
+    b = torch.tensor(clf.intercept_, dtype=torch.float32)   # (1,)
+    with torch.no_grad():
+        model.drawness_head[0].weight.copy_(w)
+        model.drawness_head[0].bias.copy_(b)
+
+    print(f"  LR init: {n_pos} draws + {n_neg} decisive  →  train accuracy {acc:.3f}")
+    print(f"  Drawness head seeded to LR solution (top dims by |weight|: "
+          f"{np.abs(clf.coef_[0]).argsort()[::-1][:5].tolist()})")
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
@@ -546,7 +610,8 @@ def train(dataset_path: str = None,
           deterministic: bool = False,
           rank_reg: float = 0.0,
           draw_reg: float = 0.0,
-          freeze_backbone: bool = False):
+          freeze_backbone: bool = False,
+          init_drawness_lr: bool = False):
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -667,6 +732,10 @@ def train(dataset_path: str = None,
                 param.requires_grad = False
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Backbone frozen — training drawness_head only ({n_trainable} parameters)")
+
+    if init_drawness_lr:
+        print("Initialising drawness head from logistic regression on training geometry ...")
+        _init_drawness_from_lr(model, data, device)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.Adam(trainable, lr=lr, weight_decay=weight_decay)
@@ -982,6 +1051,12 @@ def main():
                     help="Freeze all parameters except the drawness_head. "
                          "Use for drawness bootstrap: trains only the 129-parameter "
                          "linear head on frozen geometry, guaranteeing zero rank regression.")
+    ap.add_argument("--init-drawness-from-probe", action="store_true",
+                    dest="init_drawness_lr",
+                    help="Seed the drawness head with a logistic regression fit on training "
+                         "geometry before training begins. Finds the existing draw direction "
+                         "analytically instead of relying on BCE convergence from random init. "
+                         "Most useful with --freeze-backbone where the backbone won't reshape.")
     args = ap.parse_args()
 
     if args.dataset is None and args.endgame_positions == 0:
@@ -1009,6 +1084,7 @@ def main():
         rank_reg=args.rank_reg,
         draw_reg=args.draw_reg,
         freeze_backbone=args.freeze_backbone,
+        init_drawness_lr=args.init_drawness_lr,
     )
 
 
