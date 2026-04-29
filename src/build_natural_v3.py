@@ -36,21 +36,51 @@ def _load_split(d, split):
     return s, n
 
 
-def _load_pool(paths):
-    """Load all sources and concatenate, returning per-row train/val origin tags."""
+def _load_pool(paths, dedup_fens: bool = True):
+    """Load all sources and concatenate. With dedup_fens, skip rows whose FEN was
+    already seen (across any prior source or split). Defends against nested-ELO
+    sources or cross-month coincidences inflating common positions."""
     train_pool = None
     val_pool   = None
+    seen = set() if dedup_fens else None
+    total_dropped = 0
+
     for p in paths:
         print(f"Loading {p} ...")
         d = torch.load(p, map_location="cpu", weights_only=False)
-        for split, pool_name in [("train", "train_pool"), ("val", "val_pool")]:
+        for split in ("train", "val"):
             s, n = _load_split(d, split)
-            print(f"  {split}: n={n:,}")
-            if pool_name == "train_pool":
+            if dedup_fens:
+                s, dropped = _dedup_split(s, seen)
+                total_dropped += dropped
+                print(f"  {split}: n={n:,}  kept={len(s['tensors']):,}  dropped={dropped:,}")
+            else:
+                print(f"  {split}: n={n:,}")
+            if split == "train":
                 train_pool = _concat(train_pool, s)
             else:
                 val_pool = _concat(val_pool, s)
+
+    if dedup_fens:
+        print(f"\nDedup total dropped: {total_dropped:,}")
     return train_pool, val_pool
+
+
+def _dedup_split(s: dict, seen: set) -> tuple[dict, int]:
+    """Keep only rows whose FEN is not yet in `seen`. Mutates `seen`."""
+    if "fens" not in s:
+        return s, 0
+    fens = s["fens"]
+    keep_idx = []
+    for i, f in enumerate(fens):
+        if f in seen:
+            continue
+        seen.add(f)
+        keep_idx.append(i)
+    if len(keep_idx) == len(fens):
+        return s, 0
+    keep = torch.tensor(keep_idx, dtype=torch.long)
+    return _index(s, keep), len(fens) - len(keep_idx)
 
 
 def _concat(a, b):

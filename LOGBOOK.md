@@ -1000,3 +1000,40 @@ No train.py / shared-code changes in this batch.
 rm src/build_natural_v3.py jobs/build_natural_v3.sh jobs/train_natural_v3.sh
 ```
 No train.py changes.
+
+---
+
+## 2026-04-29 — natural v3 cancelled, v4 plan: outcome supervision
+
+### v3 problem (caught before running)
+Pooled sources `elo2000/2100/2200_sf18.pt` are **nested ELO thresholds** parsed from the same Lichess month — every game in elo2200 is also in elo2100, which is also in elo2000. Pooling = duplication = overfitting risk. Same nesting for `2021_06_all` / `2021_06_high`.
+
+Added FEN-based dedup to v3 build script as defense, but cleaner is to use known-disjoint sources.
+
+### v4 plan
+**Disjoint by month:** 2021-06 + 2023-03 + 2025-01. Three independent Lichess months, no nesting possible.
+
+**Supervision change: AlphaZero-style.** Drop SF eval as teacher signal. Use raw `outcome_values` (+1/0/-1 STM-relative game result) as the value training target. Cleaner scientifically — model learns from games alone, no engine assistance — and lets us use `dataset_2025_01.pt` which has no SF reeval.
+
+**Recipe:** Same as natural — value MSE on outcome + policy + rank-reg + no drawness scaffolding. Patience 10. Init from 2021_06_all (still has policy).
+
+**Engineering:** ~5M positions @ 7.5% drawn (subsample drawn-up, decisive-down). FEN dedup as defense.
+
+### Why outcome supervision
+- Cleaner PoC: "Petra distinguishes structural-from-balanced draws after training on Lichess games at high ELO with no engine teacher."
+- Per-position label is noisier (every position in a drawn game labelled 0, including transient sharp middlegame positions) but with 5M positions, noise averages out.
+- Validates whether SF labels were doing the work, or whether geometry self-organises from raw game outcomes too.
+
+### Files added (revertable)
+- `src/build_natural_v4.py` — multi-source pool with outcome-as-values + FEN dedup
+- `jobs/build_natural_v4.sh` — CPU build (64GB mem)
+- `jobs/train_natural_v4.sh` — gpuv100, patience 10
+
+### To revert
+```
+rm src/build_natural_v4.py jobs/build_natural_v4.sh jobs/train_natural_v4.sh
+```
+No train.py changes.
+
+### Note on running v3 vs v4
+v3 has FEN dedup so the overlap risk is mitigated, but the dedup can't recover what's lost (we keep the first occurrence of each FEN, biasing toward whichever source loaded first). v4 is the cleaner path. Either can be run, but v4 is the honest one.
