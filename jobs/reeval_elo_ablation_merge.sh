@@ -60,7 +60,7 @@ python3 -u "${SRC}/reeval_stockfish.py" \
     --min-decisive                 0.0 \
     --max-pieces                   32 \
     --derive-drawness-from-outcome \
-    --drawness-sf-threshold        0.22 \
+    --drawness-sf-threshold        0.18 \
     --drawness-target              0.8 \
     --allow-partial-coverage
 
