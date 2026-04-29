@@ -3,7 +3,7 @@
 #BSUB -q hpc
 #BSUB -n 4
 #BSUB -R "rusage[mem=8GB]"
-#BSUB -W 4:00
+#BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/parse_lichess_%J.out
 #BSUB -e /zhome/81/b/206091/logs/parse_lichess_%J.err
 

@@ -3,7 +3,7 @@
 #BSUB -q hpc
 #BSUB -n 1
 #BSUB -R "rusage[mem=16GB]"
-#BSUB -W 18:00
+#BSUB -W 24:00
 #BSUB -o /zhome/81/b/206091/logs/parse_2021_06_%J.out
 #BSUB -e /zhome/81/b/206091/logs/parse_2021_06_%J.err
 
