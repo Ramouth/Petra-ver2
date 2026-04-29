@@ -973,3 +973,30 @@ rm jobs/build_natural_v2.sh jobs/train_natural_v2.sh
 rm jobs/eval_natural_vs_2021_06_all.sh
 ```
 No train.py / shared-code changes in this batch.
+
+---
+
+## 2026-04-29 — natural v3: scale to 4.5M @ 7.5% drawn
+
+### Build result for v2
+- Pool: 1.97M base (elo2100) + 19,144 drawn from elo2200
+- Final: 1.99M @ 7.5% drawn — natural rate at 2100+ play
+- Decision: scale up further. v3 pools all reeval'd sources to 4.5M @ same fraction.
+
+### v3 plan
+**Composition:** ~4.5M positions @ 7.5% drawn, engineered by oversampling drawn rows and undersampling decisive ones from a pool of 6 SF-reeval'd sources (elo2000/2100/2200, 2021_06_all/high, 2023_03). Skips low-quality bands (low_elo, 2021_06_low/mid).
+
+**Same training recipe as natural / natural_v2** — value + policy + rank-reg, no drawness scaffolding.
+
+**Hypothesis:** scale wins. ~10× more data than natural and ~2× more than v2; same recipe. Geometry should organise drawness more cleanly while preserving more rank than natural's 33.8.
+
+### Files added
+- `src/build_natural_v3.py` — flexible multi-source pooling with draw-fraction engineering
+- `jobs/build_natural_v3.sh` — CPU build (64GB mem)
+- `jobs/train_natural_v3.sh` — gpuv100, 64GB mem, patience 10
+
+### To revert
+```
+rm src/build_natural_v3.py jobs/build_natural_v3.sh jobs/train_natural_v3.sh
+```
+No train.py changes.
