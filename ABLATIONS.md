@@ -542,7 +542,7 @@ The correct framing: a drawn ELO 2000 game is presumptively drawn. Each position
 
 Result of the bug: only **2,186 drawness positives from 1,540,000 positions (0.14%)**. The draw-reg loss was essentially silent for 99.86% of training steps. No condition could show any effect.
 
-**Fix:** Remove `--drawness-game-level`. Use position-level with `--drawness-sf-threshold 0.22` (≈90cp). Criterion: game outcome = draw AND |SF eval at this position| < 0.22. Expected yield: ~50–100k positives.
+**Fix:** Remove `--drawness-game-level`. Use position-level with `--drawness-sf-threshold 0.18` (≈73cp, 0.73 pawns). Criterion: game outcome = draw AND |SF eval at this position| < 0.18. Expected yield: ~50–100k positives.
 
 ### DRAW_REG=0.0 — Probe Results (Job 28327364, 2026-04-29)
 
