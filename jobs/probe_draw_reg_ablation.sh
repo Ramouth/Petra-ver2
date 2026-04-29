@@ -24,12 +24,13 @@
 
 DRAW_REG="${DRAW_REG:-0.0}"
 
+BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
 TAG="${DRAW_REG//./p}"
 MODEL="${HOME_DIR}/Petra-ver2/models/draw_reg_abl/dr${TAG}/best.pt"
-PROBE_DATASET="${HOME_DIR}/Petra-ver2/data/dataset_2021_06_mid_sf18.pt"
+PROBE_DATASET="${BLACKHOLE}/dataset_2021_06_mid_sf18.pt"
 
 echo "=== Draw-reg ablation probe: DRAW_REG=${DRAW_REG} ==="
 echo "Model:   ${MODEL}"
