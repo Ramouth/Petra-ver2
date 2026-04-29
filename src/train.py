@@ -165,7 +165,7 @@ def _ensure_visit_dists(d: dict) -> torch.Tensor:
     return vd
 
 
-def _drawness_fields(d: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _drawness_fields(d: dict, use_soft: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Return (drawness_mask, drawness_targets, drawness_available).
 
@@ -174,8 +174,17 @@ def _drawness_fields(d: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     non-draws. Balanced positions should have mask=False. drawness_available
     marks rows from a dataset that intentionally supplied drawness supervision,
     so older anchor heuristics are not applied to explicitly unsupervised rows.
+
+    When use_soft=True and `drawness_soft_targets` is present, every row is
+    marked supervised with its outcome-smoothed soft target. This converts
+    the binary structural-draw label into an empirical draw probability.
     """
     n = len(d["tensors"])
+    if use_soft and "drawness_soft_targets" in d:
+        soft = d["drawness_soft_targets"].float()
+        mask = torch.ones(n, dtype=torch.bool)
+        return mask, soft, mask.clone()
+
     mask = d.get("drawness_mask")
     targets = d.get("drawness_targets")
     available = d.get("drawness_available")
@@ -611,7 +620,8 @@ def train(dataset_path: str = None,
           rank_reg: float = 0.0,
           draw_reg: float = 0.0,
           freeze_backbone: bool = False,
-          init_drawness_lr: bool = False):
+          init_drawness_lr: bool = False,
+          use_soft_drawness: bool = False):
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -655,7 +665,9 @@ def train(dataset_path: str = None,
     def _make_loader(data, split, shuffle, force_visit_dists=False):
         d = data[split]
         has_batch_vd = ("visit_dists" in d) or ("anchor_visit_dists" in d)
-        split_drawness_mask, split_drawness_targets, split_drawness_available = _drawness_fields(d)
+        split_drawness_mask, split_drawness_targets, split_drawness_available = _drawness_fields(
+            d, use_soft=use_soft_drawness
+        )
 
         def _collate(batch):
             idxs = torch.tensor([row[0] for row in batch], dtype=torch.long)
@@ -775,14 +787,23 @@ def train(dataset_path: str = None,
         print(f"Rank regularisation: λ={rank_reg}  "
               f"(tr(C²) penalty — maximises effective rank)")
     if draw_reg > 0:
-        draw_mask_train, draw_targets_train, _ = _drawness_fields(data["train"])
+        draw_mask_train, draw_targets_train, _ = _drawness_fields(
+            data["train"], use_soft=use_soft_drawness
+        )
         n_draw_pos = int((draw_mask_train & (draw_targets_train > 0.5)).sum())
         if n_draw_pos == 0 and not anchor_dataset:
             print(f"WARNING: --draw-reg set but no explicit structural draw positives. "
                   f"Drawness loss will only train on negatives unless older anchor "
                   f"heuristics find |v|<0.15 anchor rows.")
-        print(f"Drawness regularisation: λ={draw_reg}  "
-              f"(BCE — explicit structural draws vs decisive positions)")
+        if use_soft_drawness:
+            print(f"Drawness regularisation: λ={draw_reg}  "
+                  f"(BCE on outcome-smoothed soft targets — empirical draw probability)")
+            print(f"  soft target stats — mean={draw_targets_train.mean():.3f}  "
+                  f"median={float(draw_targets_train.median()):.3f}  "
+                  f">0.5: {(draw_targets_train > 0.5).float().mean()*100:.1f}%")
+        else:
+            print(f"Drawness regularisation: λ={draw_reg}  "
+                  f"(BCE — explicit structural draws vs decisive positions)")
     print(f"Geometry patience: {geo_patience} epochs  "
           f"(stops when rank and win·draw cosine both plateau)\n")
     rank_col = f"  {'RankL':>6}" if rank_reg > 0 else ""
@@ -1057,6 +1078,13 @@ def main():
                          "geometry before training begins. Finds the existing draw direction "
                          "analytically instead of relying on BCE convergence from random init. "
                          "Most useful with --freeze-backbone where the backbone won't reshape.")
+    ap.add_argument("--soft-drawness-targets", action="store_true",
+                    dest="use_soft_drawness",
+                    help="Use the dataset's drawness_soft_targets field (built by "
+                         "build_soft_drawness.py) instead of binary structural-draw labels. "
+                         "Every row is supervised with its outcome-smoothed soft target "
+                         "(empirical draw rate over k geometric neighbours). Requires "
+                         "the dataset to contain drawness_soft_targets and --draw-reg > 0.")
     args = ap.parse_args()
 
     if args.dataset is None and args.endgame_positions == 0:
@@ -1085,6 +1113,7 @@ def main():
         draw_reg=args.draw_reg,
         freeze_backbone=args.freeze_backbone,
         init_drawness_lr=args.init_drawness_lr,
+        use_soft_drawness=args.use_soft_drawness,
     )
 
 

@@ -855,3 +855,82 @@ attempt, which sent job 28325516 to default queue with no directives — killed)
 **Decision gate:** If rank and W·D cosine are flat across all conditions → draw-reg does not reshape geometry and we stop pursuing it as a mechanism. If the 0.0 baseline already shows good W·D cosine from ELO 2000 data alone → the data is doing the work, not the loss term.
 
 **Prerequisite:** ELO 2000 merge (`bsub -env "MIN_ELO=2000" < jobs/reeval_elo_ablation_merge.sh`) must complete first.
+
+---
+
+## 2026-04-29 — Drawness eval reveals policy gap, two new experiments
+
+### Findings
+- `drawness_full` (rank 40.2) at 32.5% wr vs feb_sf after 100/200 games — losing.
+- `drawness_head_v2` (rank 75.6, frozen + LR-init head) at 27.5% after 20/200 — losing harder.
+- Confirmed `drawness` is NOT consumed in `mcts.py`/`evaluate.py` — drawness head is auxiliary, never used in play.
+- Therefore drawness_head_v2 vs feb_sf ≡ phase15_mid_no_endgame vs feb_sf in play.
+- Root cause: **phase15 was trained with `--policy-weight 0.0`**; feb_sf has trained policy. MCTS comparison is unfair, not a rank-→-ELO falsification.
+
+### New experiments queued
+
+#### 1. `natural` — drop drawness scaffolding, just train on the data
+Hypothesis: the curriculum's value distribution (76k drawn + 400k decisive) is enough to shape geometry into draw-aware regions without explicit BCE. Init from `2021_06_all` (rank 87, has trained policy from Phase 1).
+
+| | natural |
+|---|---|
+| init | `2021_06_all/best.pt` |
+| dataset | `dataset_drawness_curriculum.pt` |
+| policy-weight | 1.0 |
+| rank-reg | 0.5 |
+| draw-reg | **0.0** |
+| script | `jobs/train_natural.sh` |
+
+#### 2. `soft_drawness` — RL-flavored drawness via outcome smoothing
+For each position, drawness target = fraction of its k=50 nearest geometric neighbours whose game ended in a draw. Replaces binary "is structurally drawn" with continuous *empirical draw probability*. Companion to `natural` — tests whether soft outcome-derived targets shape geometry better than no scaffolding at all.
+
+| | soft_drawness |
+|---|---|
+| init | `2021_06_all/best.pt` |
+| dataset | `dataset_drawness_curriculum_soft.pt` (built fresh) |
+| policy-weight | 1.0 |
+| rank-reg | 0.5 |
+| draw-reg | 0.5 |
+| extra | `--soft-drawness-targets` |
+| build script | `jobs/build_soft_drawness.sh` |
+| train script | `jobs/train_soft_drawness.sh` |
+
+### Code changes (revertable)
+
+**Files added** (delete to revert):
+- `src/build_soft_drawness.py` — k-NN over training geometry, computes outcome-smoothed targets, writes `drawness_soft_targets` field on the dataset.
+- `jobs/build_soft_drawness.sh` — submit script for the above.
+- `jobs/train_soft_drawness.sh` — soft-drawness training run.
+- `jobs/train_natural.sh` — natural (no drawness scaffolding) training run.
+- `jobs/eval_natural_vs_feb_sf.sh` — head-to-head eval.
+- `jobs/eval_drawness_head_v2_vs_feb_sf.sh` — head-to-head eval.
+- `jobs/eval_drawness_full_vs_feb_sf.sh` — head-to-head eval.
+- `jobs/train_drawness_head_v2.sh` — frozen + LR-init drawness head.
+
+**Files modified** (search for the diff markers below to revert):
+- `src/train.py`:
+  - `_drawness_fields(d, use_soft=False)` — added `use_soft` param. When True and `drawness_soft_targets` is in the dataset, returns mask=all-True and targets=soft_targets, overriding the binary structural-draw labels.
+  - `train(...)` — added `use_soft_drawness=False` param, threaded into `_make_loader` and the draw-reg log line.
+  - CLI: added `--soft-drawness-targets` flag (sets `use_soft_drawness`).
+  - CLI: previously added `--init-drawness-from-probe` flag (already in tree from drawness_head_v2 work).
+
+**Datasets** (no destructive changes):
+- New file: `dataset_drawness_curriculum_soft.pt` (in blackhole). Original `dataset_drawness_curriculum.pt` untouched.
+
+**Models** (no destructive changes):
+- New dirs: `models/natural/`, `models/soft_drawness/`. Existing models untouched.
+
+### To revert all of this
+```
+rm src/build_soft_drawness.py
+rm jobs/build_soft_drawness.sh jobs/train_soft_drawness.sh
+rm jobs/train_natural.sh jobs/eval_natural_vs_feb_sf.sh
+rm jobs/eval_drawness_head_v2_vs_feb_sf.sh jobs/eval_drawness_full_vs_feb_sf.sh
+rm jobs/train_drawness_head_v2.sh
+git checkout src/train.py    # reverts _drawness_fields + CLI changes
+```
+The `--init-drawness-from-probe` flag and `_init_drawness_from_lr` function in `train.py` are from the prior drawness_head_v2 work — leave them or revert separately.
+
+### Decision gates
+- **natural**: rank ≥ 70 + KR vs KR value < 0.35 + Cohen's d > 1 on probe Check 6 + wr > 50% vs feb_sf → drawness scaffolding was unnecessary.
+- **soft_drawness**: same gates. If beats natural → empirical-probability framing produces better geometry than data alone. If ties natural → soft targets are equivalent to nothing. If loses to natural → soft targets are noise.
