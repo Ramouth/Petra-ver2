@@ -1188,3 +1188,62 @@ Two story layers:
 2. **General**: geometric capacity is fungible — high rank without commitment is wasted; low rank with structure can outperform it. Rank trade-offs are productive, not destructive.
 
 Story 2 is the broader contribution — applicable to any representation-learning context, not just chess.
+
+---
+
+## 2026-04-30 — natural_v2 trained; three-way ablation fork ready
+
+### natural_v2 training result (Job 28327762)
+
+Ran in parallel with natural. Same recipe (no drawness scaffolding), 4× more data (1.99M @ 7.5% drawn).
+
+| Metric | natural | natural_v2 |
+|---|---|---|
+| Best rank (curriculum-domain) | 34.6 | 33.5 |
+| KR vs KR value | +0.199 | **+0.024** |
+| Top1 (final) | 0.248 | **0.300** |
+| Epochs run | 25 | 32 |
+| All sign checks | ✓ | ✓ |
+| Drawness head | 0.501 / 0.509 (untrained, expected) | 0.509 / 0.496 (untrained, expected) |
+
+`natural_v2`'s KR vs KR value (+0.024) is **much closer to zero** than natural's (+0.199). The structural-draw region is more cleanly organised. Top1 0.300 is also notably higher — more data produced a sharper policy.
+
+Same-lineage head-to-head queued: `eval_natural_v2_vs_2021_06_all.sh`.
+
+### The three-way fork
+
+Once `natural_v2 vs 2021_06_all` finishes, we have three candidates trained from `2021_06_all` with three philosophies:
+
+| Branch | Data | Supervision | Scaffolding | Result |
+|---|---|---|---|---|
+| `natural` | curated curriculum (477k, SF) | SF eval | none | **70.6% vs 2021_06_all** |
+| `natural_v2` | elo2100 + drawn-2200 (2M, SF) | SF eval | none | TBD |
+| `natural_v4` (queued) | 3 disjoint months (5M, raw outcome) | game outcome | none | not yet trained |
+| `soft_drawness` (queued) | curriculum + outcome-smoothed soft targets | SF eval + soft BCE | RL-inspired | not yet trained |
+
+This is the project's main fork point. Each branch tests a different hypothesis:
+
+- **natural vs natural_v2**: does scale + raw 2100+ data beat curated drawness positives? Tests whether the |SF|<0.15+ply≥40 curation was contributing real signal.
+- **natural vs natural_v4**: does outcome supervision (no SF teacher) match SF-supervised? Tests whether SF labels were doing the work.
+- **natural vs soft_drawness**: does empirical-probability soft drawness target beat no scaffolding at all? Tests the RL-inspired framing.
+
+### What the result-set will tell us
+
+After all three head-to-heads vs 2021_06_all complete:
+
+- If **natural ≈ natural_v2**: data composition matters more than curation method.
+- If **natural_v2 > natural**: scale + clean source mixing wins.
+- If **natural_v4 ≈ natural**: SF labels weren't doing critical work; outcome supervision suffices.
+- If **soft_drawness > natural**: RL-inspired soft targets help; merits scaling up.
+- If **soft_drawness < natural**: scaffolding really is dead even when soft.
+- If **soft_drawness ≈ natural**: it's the data; the loss function is incidental.
+
+### Files added
+- `jobs/eval_natural_v2_vs_2021_06_all.sh` — same-lineage head-to-head matching the natural eval.
+
+### Reminder: RL track is also queued
+The `soft_drawness` experiment (RL-inspired) is built and ready:
+- `jobs/build_soft_drawness.sh` (CPU, ~30 min — builds `dataset_drawness_curriculum_soft.pt` with k=50 outcome-smoothed targets)
+- `jobs/train_soft_drawness.sh` (GPU, ~10–30 min — trains with `--soft-drawness-targets` and `--draw-reg 0.5`)
+
+If we want all three branches in hand for tomorrow's analysis, both should be submitted now.
