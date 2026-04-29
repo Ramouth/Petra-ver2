@@ -575,20 +575,54 @@ Trained 7 epochs (geometry patience exhausted). Probed on `dataset_2021_06_mid_s
 
 5. **KNN vs K value = +0.851** — the model reads material (two knights vs one king) as winning, which is geometrically correct for a material-heavy position but wrong for a known fortress draw. This is the exact failure mode the drawness head should correct.
 
-### Round 2 — Pending
+### Round 2 — In progress (2026-04-29)
 
-After conditions 0.2–2.0 complete (for completeness), re-merge with corrected labels and retrain all 5 conditions. The Round 2 ablation will be the valid experiment.
+Re-merged with corrected labels: position-level, threshold 0.18 (≈73cp).
+Result: **29,346 drawness positives from 1,540,000 positions (1.9%).**
+All 5 conditions resubmitted and queued.
 
-**Round 2 submit commands (after re-merge):**
-```bash
-bsub -env "MIN_ELO=2000" < jobs/reeval_elo_ablation_merge.sh   # re-merge with fixed labels
-# then retrain:
-bsub -env "DRAW_REG=0.0" < jobs/train_draw_reg_ablation.sh
-bsub -env "DRAW_REG=0.2" < jobs/train_draw_reg_ablation.sh
-bsub -env "DRAW_REG=0.5" < jobs/train_draw_reg_ablation.sh
-bsub -env "DRAW_REG=1.0" < jobs/train_draw_reg_ablation.sh
-bsub -env "DRAW_REG=2.0" < jobs/train_draw_reg_ablation.sh
-```
+### Drawness data bottleneck — next steps (2026-04-29)
+
+29,346 positives is better but still sparse. More critically, the position-level
+game-outcome approach has a structural problem:
+
+**Middlegame positions from drawn games must NOT be used as drawness positives.**
+A balanced middlegame position (|SF| ≈ 0) in a game that ends in a draw is not
+reliably a structural draw — the same position type appears equally in decisive
+games. Labelling these as drawness=0.8 conflates "balanced" with "drawn" and
+will hurt backbone geometry by pulling equal middlegame positions toward the draw
+cluster regardless of whether they are genuinely drawable.
+
+The 29,346 positives are filtered by `ply≥40 & |SF|<0.18` which keeps late-game
+settled positions — these are more reliable. But coverage is still too sparse to
+train a generalising head.
+
+**Correct approach: parse more PGN files, extract late-game draw positions**
+
+The drawness positives must come from game data (not generated endgames) so the
+distribution matches what the model sees in play. The pipeline:
+
+1. Parse additional Lichess PGN months (ELO ≥ 2000) — more games → more drawn
+   games → more late-game positions with `|SF| < 0.18 & game=draw`
+2. Target: **~100k drawness positives** across the full curriculum dataset
+3. Decisive positions (|SF| > 0.5, from any game) as clean negatives — these
+   are already abundant in the main dataset
+
+**Why not more middlegame draw positions:**
+- Middlegame positions look equal in both drawn and decisive games
+- Adding them as drawness=0.8 injects noise into the supervision signal
+- The head learns "equal-looking → drawn" which is exactly what we're trying
+  to fix (the current failure mode)
+- Late-game positions in drawn games are structurally more reliable: by move 40+
+  with low SF eval, the draw is almost certainly forced or agreed
+
+**Implementation:**
+- Parse 1–2 additional Lichess months at ELO ≥ 2000
+- Run reeval (SF depth 18) on the new data
+- Merge with `--derive-drawness-from-outcome --drawness-sf-threshold 0.18`
+  (same criteria, no game-level flag)
+- Combine drawness positives with existing dataset
+- Use as the draw-reg Round 3 curriculum
 
 ### Results Table (Round 1 — invalid)
 
