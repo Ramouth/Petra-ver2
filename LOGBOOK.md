@@ -934,3 +934,42 @@ The `--init-drawness-from-probe` flag and `_init_drawness_from_lr` function in `
 ### Decision gates
 - **natural**: rank ≥ 70 + KR vs KR value < 0.35 + Cohen's d > 1 on probe Check 6 + wr > 50% vs feb_sf → drawness scaffolding was unnecessary.
 - **soft_drawness**: same gates. If beats natural → empirical-probability framing produces better geometry than data alone. If ties natural → soft targets are equivalent to nothing. If loses to natural → soft targets are noise.
+
+---
+
+## 2026-04-29 — natural results + natural v2 plan
+
+### natural results (Job 28327697)
+- Best rank: 34.6 (curriculum-domain) / 33.8 (standard probe `dataset_2021_06_mid_sf18.pt`)
+- KR vs KR value: +0.199 ✓ (passes <0.35 sanity)
+- All sign checks passed
+- **Cohen's d on Check 6: 1.827** (structural-vs-balanced separation)
+- **LR accuracy: 0.926** — geometry organised drawness with NO scaffolding
+- Top1 policy: 0.216 → 0.248 (climbed steadily, policy properly trained)
+- Drawness head: 0.501 / 0.509 (random output — head wasn't trained, by design)
+
+**Conclusion:** Data-not-hyperparameters thesis confirmed. The geometry self-organises a structural-draw region from value labels alone when the curriculum has the right composition. Auxiliary BCE / draw-reg / LR-init were scaffolding, not mechanism.
+
+**Cost:** Rank dropped 87 → 33.8 on standard probe. Expected — curriculum's distribution is far from 2021_06_mid. Need cross-distribution rank check before declaring full picture.
+
+### natural v2 plan
+**Data composition:**
+- Base: full `dataset_elo2100_sf18.pt` (all 2100+ ELO positions, all outcomes)
+- Draw boost: drawn-only subset of `dataset_elo2200_sf18.pt` (filtered by `outcome_values == draw`)
+- Output: `dataset_natural_v2.pt`
+
+**Training recipe:** identical to natural — value + policy + rank-reg, no drawness scaffolding. Patience bumped to 10 (more data → longer reshape expected).
+
+### Files added (revertable)
+- `src/build_natural_v2.py` — concat full elo2100 + drawn-only elo2200
+- `jobs/build_natural_v2.sh` — CPU build job
+- `jobs/train_natural_v2.sh` — gpuv100 training job
+- `jobs/eval_natural_vs_2021_06_all.sh` — same-lineage head-to-head
+
+### To revert this batch
+```
+rm src/build_natural_v2.py
+rm jobs/build_natural_v2.sh jobs/train_natural_v2.sh
+rm jobs/eval_natural_vs_2021_06_all.sh
+```
+No train.py / shared-code changes in this batch.
