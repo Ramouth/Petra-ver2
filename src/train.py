@@ -787,8 +787,9 @@ def train(dataset_path: str = None,
                 best_cos = cos
             if draw_improved:
                 best_draw_gap = draw["gap"]
-            # best.pt requires both rank improvement AND healthy topology
-            if rank_improved and last_topo_healthy:
+            # best.pt requires rank OR drawness improvement, plus healthy topology.
+            # When backbone is frozen, rank won't move — drawness is the gating signal.
+            if (rank_improved or draw_improved) and last_topo_healthy:
                 torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
                 print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ new best")
             else:

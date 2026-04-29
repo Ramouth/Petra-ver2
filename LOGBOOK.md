@@ -740,3 +740,92 @@ on ELO as a proxy.
 **Note on multiple Lichess files:** Additional months available (2021-06, 2023-03,
 2025-01, 2025-02). If 2200+ games are too sparse in a single month, chain months
 to reach 250k qualifying games.
+
+---
+
+## Phase 3A — Drawness Probe: rank-89.9 geometry separability (2026-04-29, Job 28320925)
+
+**Question:** Does `phase15_mid_no_endgame/best.pt` (rank 89.9) already encode the
+structural draw distinction latently?
+
+**Result: YES — 99% separability, Cohen's d = 3.769.**
+
+Check 6 (equal-region subspace probe) generated ~450 structural draw positions
+(KR vs KR, KNN vs K, KB vs KB) and compared their geometry vectors against the
+`|v|<0.2` pool from the probe dataset. Logistic regression (5-fold CV) achieved
+0.990 accuracy. The drawness head outputs 0.516–0.540 for all position types — it
+is completely untrained (model was trained with `--draw-reg 0.0`).
+
+| Metric | Value |
+|--------|-------|
+| LR accuracy (5-fold CV) | **0.990** |
+| Cohen's d on PC1 | **3.769** |
+| PC1 — structural draws | +0.418 ± 0.152 |
+| PC1 — equal+decisive | −0.021 ± 0.081 |
+| Centroid cosine | +0.1686 |
+| Top separating dims | [101, 84, 48, 99, 6] |
+
+The hyperplane is already in the geometry. The drawness head needs only to be
+pointed at it. Decision: `train_drawness_bootstrap.sh` with frozen backbone,
+init from `phase15_mid_no_endgame/best.pt`.
+
+**Open question:** Is the separation genuine drawness (Hypothesis B) or piece-count
+proxy (Hypothesis A)? Decisive endgame stages (KQ vs K etc.) in the training data
+serve as explicit negatives — the head will be told few-piece-decisive = 0 and
+few-piece-structural-draw = 1, so the conflation is resolved by training regardless
+of which hypothesis is correct.
+
+---
+
+## Phase 3B — Drawness Bootstrap v1 (2026-04-29, Job 28320933)
+
+**Setup:**
+- Init: `phase15_mid_no_endgame/best.pt` (rank 89.9)
+- `--freeze-backbone --draw-reg 0.05 --epochs 2 --geo-patience 2`
+- Endgame stages 1 2 4 5 9 10 11, 250k positions
+- Drawness labels: pos=357,370 neg=490,919
+
+**Result: head failed to learn.**
+
+| Epoch | DrawL | KR vs KR drawness | Sicilian drawness | gap |
+|-------|-------|-------------------|-------------------|-----|
+| 1 | 0.641 | 0.415 | 0.378 | +0.037 |
+| 2 | 0.639 | 0.434 | 0.359 | +0.075 |
+
+Gates: KR vs KR >0.7 (failed), Sicilian <0.3 (failed). DrawL barely moved.
+
+**Diagnosis:** λ=0.05 starved the drawness head of gradient. GNorm=0.002 across both
+epochs — 20× below what Adam needs to converge a 129-parameter linear layer in 2
+epochs. The loss is `vloss + 0.05 × draw_bce`; only the draw_bce term flows to the
+drawness head (backbone frozen, value_head frozen). Effective gradient ≈ 0.05 × ∂BCE/∂θ.
+Data pipeline confirmed correct (drawness_mask/drawness_targets properly set).
+
+**Additional bug found:** `best.pt` was gated on `rank_improved AND topo_healthy`.
+With frozen backbone, rank on endgame val barely moves after epoch 1 → best.pt stays
+at epoch 1 (gap=0.037) even as epoch 2 improves (gap=0.075). Sanity check was
+therefore reporting epoch 1 state.
+
+### Changes made
+
+**train.py** — `best.pt` saving condition widened to `(rank_improved OR draw_improved)
+AND topo_healthy`. Frozen-backbone runs where rank is flat now save on drawness
+improvement.
+
+**train_drawness_bootstrap.sh** — v2 parameters:
+- `--draw-reg 0.05` → `--draw-reg 1.0` (20× stronger gradient)
+- `--epochs 2` → `--epochs 10`
+- `--geo-patience 2` → `--geo-patience 10`
+
+### Caveat
+
+The λ diagnosis is consistent with the observed GNorm and DrawL trajectory, but has
+not been confirmed by a successful run. **Training configuration may not be the only
+issue.** Other candidates if v2 also fails:
+- Gradient flow to drawness head broken (g.requires_grad=False when backbone frozen —
+  should still work since drawness_head.weight has requires_grad=True, but unverified)
+- Drawness labels from stages 1/2/4/5 not correctly structured (decisiveness vs
+  structural draw split in the endgame generator)
+- Head needs weight init from probe separating direction (ABLATIONS.md §Hypothesis B)
+
+v2 resubmitted 2026-04-29 (job submitted after bsub trailing-period error on first
+attempt, which sent job 28325516 to default queue with no directives — killed).
