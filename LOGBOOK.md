@@ -1247,3 +1247,47 @@ The `soft_drawness` experiment (RL-inspired) is built and ready:
 - `jobs/train_soft_drawness.sh` (GPU, ~10–30 min — trains with `--soft-drawness-targets` and `--draw-reg 0.5`)
 
 If we want all three branches in hand for tomorrow's analysis, both should be submitted now.
+
+---
+
+## 2026-04-30 — natural_v2 probe: Cohen's d 4.5, rank UP
+
+Probed `natural_v2/best.pt` on `dataset_2021_06_mid_sf18.pt`. The result is substantially stronger than natural's probe on every drawness-relevant axis.
+
+### Comparison table
+
+| Metric | natural | **natural_v2** | Δ |
+|---|---|---|---|
+| Effective rank (mid probe) | 33.8 | **36.2** | +2.4 |
+| Cohen's d on PC1 (Check 6) | 1.827 | **4.500** | **+146%** |
+| LR accuracy (Check 6) | 0.926 | **0.970** | +4.4 pp |
+| PC1 variance share (Check 6) | 4.6% | **11.1%** | 2.4× |
+| Within-group spread (structural) | 0.920 | 0.638 | tighter |
+| Centroid distance (struct ↔ balanced) | 0.391 | 0.741 | +89% |
+| KR vs KR value | +0.199 | **+0.024** | closer to 0 |
+| win·draw strict cosine | +0.4090 | **+0.0800** | near-orthogonal |
+| Separation gap (Check 2) | 0.1591 | **0.2556** | +61% |
+| Top1 final (training) | 0.248 | **0.300** | +5.2 pp |
+| Top dims (Check 6) | [100, 30, 89, 102, 3] | [33, 66, 126, 51, 124] | different geometry |
+
+### Significance
+
+- **Cohen's d 4.5** matches `drawness_full`'s 4.06 — but drawness_full achieved that by destroying rank to 40 via unfrozen BCE. natural_v2 reaches 4.5 with rank 36.2 and **zero drawness scaffolding**.
+- **PC1 explains 11.1% of variance** (vs natural's 4.6%) — the draw axis is 2× more dominant in the geometry. The structural-draw concept is now a *primary* dimension of the bottleneck.
+- **Rank went UP** from natural's 33.8 to 36.2 despite 4× more data. Counter to a naive "more reshape costs rank" reading of the DoF frame, but consistent with: scale lets the model commit more dimensions to structure without sacrificing other capacity. Volume buys back DoF.
+- **win·draw strict cosine 0.08** — draws are now near-orthogonal to wins. natural still had +0.41. This is the "three-pole geometry" we've been chasing — three nearly orthogonal regions for win / loss / draw.
+
+### Updated rank-as-DoF interpretation
+
+The DoF frame was framed earlier as a fixed budget (commit a dim, lose rank). natural_v2 shows the budget is elastic: with enough training data, the model can *grow* committed structure without paying capacity tax. Big data lets you commit dimensions productively rather than zero-sum.
+
+This sharpens the recipe:
+- **Small curated data**: rank-vs-structure is zero-sum (natural).
+- **Large clean data**: rank-vs-structure can both improve (natural_v2).
+
+### Next steps prompted by this result
+
+- **Run `eval_natural_v2_vs_2021_06_all.sh`** — does the cleaner geometry produce more ELO than natural's 70.6%? If yes, scale is strictly better than curation. If natural still wins on ELO despite weaker probe metrics, the SF curriculum was contributing something beyond what shows in the probe.
+- **Run `natural_v2 vs natural`** — direct head-to-head between the two candidates. Whichever wins becomes the production model.
+- **soft_drawness vs natural_v2** — if soft_drawness is also run, it competes with natural_v2 for the title. Cohen's d 4.5 is high enough that beating it requires actually-good scaffolding.
+- **natural_v4 (5M, outcome supervision)** is now the strategic experiment: with 2.5× more data than v2 and outcome-only labels, can geometry organise drawness as well or better than natural_v2's? If yes, SF labels are unnecessary.
