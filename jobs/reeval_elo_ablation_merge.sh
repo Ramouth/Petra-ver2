@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 #BSUB -J reeval_elo${MIN_ELO:-2000}_merge
 #BSUB -q hpc
 #BSUB -n 4
@@ -15,10 +16,10 @@
 #   bsub -env "MIN_ELO=2200" < jobs/reeval_elo_ablation_merge.sh
 #
 # Outputs: dataset_elo{MIN_ELO}_sf18.pt
-# N=1,000,000 is fixed across all bands for a controlled comparison.
+# N=5,000,000 must match what the chunk jobs used (recorded in partials).
 
 MIN_ELO="${MIN_ELO:-2000}"
-N=1000000
+N=5000000
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"
