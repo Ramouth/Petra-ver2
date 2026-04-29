@@ -575,61 +575,102 @@ Trained 7 epochs (geometry patience exhausted). Probed on `dataset_2021_06_mid_s
 
 5. **KNN vs K value = +0.851** — the model reads material (two knights vs one king) as winning, which is geometrically correct for a material-heavy position but wrong for a known fortress draw. This is the exact failure mode the drawness head should correct.
 
-### Round 2 — In progress (2026-04-29)
+### Round 2 — CANCELLED (2026-04-29)
 
-Re-merged with corrected labels: position-level, threshold 0.18 (≈73cp).
-Result: **29,346 drawness positives from 1,540,000 positions (1.9%).**
-All 5 conditions resubmitted and queued.
+Re-merged with corrected labels (position-level, threshold 0.18 ≈73cp) gave
+**29,346 positives from 1,540,000 positions (1.9%)**. All 5 conditions were
+resubmitted but killed before completing — 1.9% density is still too sparse.
 
-### Drawness data bottleneck — next steps (2026-04-29)
+DRAW_REG=0.2 training log confirmed the diagnosis: with ~2k positives per epoch
+the head collapses to outputting ~0.02 for everything as decisive negatives
+overwhelm the rare positive gradient. Not worth the GPU time.
 
-29,346 positives is better but still sparse. More critically, the position-level
-game-outcome approach has a structural problem:
+### Drawness data — structural insight (2026-04-29)
 
 **Middlegame positions from drawn games must NOT be used as drawness positives.**
-A balanced middlegame position (|SF| ≈ 0) in a game that ends in a draw is not
-reliably a structural draw — the same position type appears equally in decisive
-games. Labelling these as drawness=0.8 conflates "balanced" with "drawn" and
-will hurt backbone geometry by pulling equal middlegame positions toward the draw
-cluster regardless of whether they are genuinely drawable.
+A balanced middlegame position (|SF| ≈ 0) in a drawn game is not a reliable
+structural draw signal — the same position type appears equally in decisive games.
+Labelling it drawness=0.8 conflates "balanced" with "drawn."
 
-The 29,346 positives are filtered by `ply≥40 & |SF|<0.18` which keeps late-game
-settled positions — these are more reliable. But coverage is still too sparse to
-train a generalising head.
+Late-game settled positions (ply≥40, |SF|<0.18) in drawn games are more reliable:
+by move 40+ with low SF eval, the draw is almost certainly forced or agreed. These
+are what the current criterion captures.
 
-**Correct approach: parse more PGN files, extract late-game draw positions**
+### Drawness positives across all ELO bands (2026-04-29)
 
-The drawness positives must come from game data (not generated endgames) so the
-distribution matches what the model sees in play. The pipeline:
+ELO 2100 and 2200 reeval chunks were already complete on blackhole (killed jobs
+had finished their SF evaluation). Merged both at zero extra compute cost.
 
-1. Parse additional Lichess PGN months (ELO ≥ 2000) — more games → more drawn
-   games → more late-game positions with `|SF| < 0.18 & game=draw`
-2. Target: **~100k drawness positives** across the full curriculum dataset
-3. Decisive positions (|SF| > 0.5, from any game) as clean negatives — these
-   are already abundant in the main dataset
+| Band | Positions | Drawness positives | Rate |
+|------|-----------|-------------------|------|
+| ELO 2000 | 1,540,000 | 29,346 | 1.90% |
+| ELO 2100 | 2,078,242 | 41,251 | 1.98% |
+| ELO 2200 | 284,740 | 6,254 | 2.20% |
+| **Total** | **3,902,982** | **76,851** | **1.97%** |
 
-**Why not more middlegame draw positions:**
-- Middlegame positions look equal in both drawn and decisive games
-- Adding them as drawness=0.8 injects noise into the supervision signal
-- The head learns "equal-looking → drawn" which is exactly what we're trying
-  to fix (the current failure mode)
-- Late-game positions in drawn games are structurally more reliable: by move 40+
-  with low SF eval, the draw is almost certainly forced or agreed
+Draw rate rises with ELO as expected. ELO 2200 coverage is small (jobs were
+killed early) but the 2.2% rate confirms the trend.
 
-**Implementation:**
-- Parse 1–2 additional Lichess months at ELO ≥ 2000
-- Run reeval (SF depth 18) on the new data
-- Merge with `--derive-drawness-from-outcome --drawness-sf-threshold 0.18`
-  (same criteria, no game-level flag)
-- Combine drawness positives with existing dataset
-- Use as the draw-reg Round 3 curriculum
+### Curriculum dataset — `dataset_drawness_curriculum.pt` (2026-04-29)
+
+76,851 positives spread across 3.9M positions is still only 2% density — the
+head won't see enough signal per epoch. Solution: build a focused curriculum with
+only the signal-bearing positions.
+
+**`src/build_drawness_curriculum.py`** extracts:
+- All 76,851 drawness positives (target=0.8)
+- 400,000 decisive positions sampled from the same datasets (|v|>0.5, target=0.0
+  via draw_neg mask in train.py — no explicit drawness_mask needed)
+
+Result: **476,851 positions, 16.1% drawness / 83.9% decisive.**
+Every batch has meaningful signal in both directions. No muddy middle.
+
+```
+train: 453,009  val: 23,842
+```
+
+### Round 3 — Curriculum drawness training (queued 2026-04-29)
+
+Two parallel runs on `dataset_drawness_curriculum.pt`, both init from
+`phase15_mid_no_endgame/best.pt` (rank 89.9):
+
+**Run A — Frozen backbone (`models/drawness_head/best.pt`)**
+- `--freeze-backbone --draw-reg 1.0 --rank-reg 0.0 --lr 1e-3 --epochs 30`
+- Only the 129-parameter drawness head updates
+- Tests: does the existing geometry (rank 89.9, Cohen's d=4.575) already
+  support a linear drawness separator?
+- Rank guaranteed unchanged
+
+**Run B — Unfrozen backbone (`models/drawness_full/best.pt`)**
+- `--draw-reg 1.0 --rank-reg 0.5 --lr 3e-4 --epochs 20`
+- Both backbone and head update jointly
+- Tests: can the draw dimension open further with explicit supervision?
+- Gate: rank ≥ 70 (backbone allowed to reshape but must not collapse)
+
+**Gates (both runs):**
+- KR vs KR drawness > 0.7
+- Sharp balanced middlegame drawness < 0.3
+- KNN vs K drawness > 0.7
+- KQ vs K decisive drawness < 0.3
+
+**Interpretation:**
+- Frozen passes → geometry is sufficient, head just needed proper training data
+- Frozen fails, unfrozen passes → geometry needs reshaping; draw-reg on curriculum works
+- Both fail → need higher-rank backbone (rank 89.9 not sufficient for linear separation)
 
 ### Results Table (Round 1 — invalid)
 
 | DRAW_REG | Epochs | Rank (probe) | W·D cos | Cohen's d | Drawness gates | ELO Δ vs phase15_noe |
 |----------|--------|-------------|---------|-----------|----------------|----------------------|
-| 0.0 | 7 | 78.9 | −0.124 | 4.575 | 0/4 | pending |
-| 0.2 | — | — | — | — | — | — |
-| 0.5 | — | — | — | — | — | — |
-| 1.0 | — | — | — | — | — | — |
-| 2.0 | — | — | — | — | — | — |
+| 0.0 | 7 | 78.9 | −0.124 | 4.575 | 0/4 | pending ELO |
+| 0.2 | ~12 (killed) | — | — | — | 0/4 (head→0) | — |
+| 0.5 | killed | — | — | — | — | — |
+| 1.0 | killed | — | — | — | — | — |
+| 2.0 | killed | — | — | — | — | — |
+
+### Results Table (Round 3 — pending)
+
+| Run | Backbone | Epochs | Rank | W·D cos | Drawness gates | ELO Δ |
+|-----|----------|--------|------|---------|----------------|-------|
+| A (frozen head) | frozen | — | 89.9 (fixed) | — | — | — |
+| B (full) | unfrozen | — | — | — | — | — |
