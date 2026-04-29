@@ -829,3 +829,29 @@ issue.** Other candidates if v2 also fails:
 
 v2 resubmitted 2026-04-29 (job submitted after bsub trailing-period error on first
 attempt, which sent job 28325516 to default queue with no directives — killed).
+
+---
+
+## Phase 3C — Draw-reg Ablation on ELO 2000 (PENDING — awaiting merge)
+
+**Question:** Does draw-reg actually reshape backbone geometry, or does it only train the drawness head regardless of λ?
+
+**Motivation:** draw-reg has no confirmed evidence of improving geometry. The draw region opened in Phase 2A and Exp B without draw-reg (rank-reg + no-policy did it). ELO 2000 data has more genuine draws than prior datasets, which may change the picture.
+
+**Design:** 5 conditions varying only `--draw-reg`. Everything else fixed.
+
+| Condition | draw-reg | rank-reg | policy-weight | init |
+|-----------|----------|----------|---------------|------|
+| dr0p0 | 0.0 | 0.5 | 0.0 | phase15_mid_no_endgame |
+| dr0p2 | 0.2 | 0.5 | 0.0 | phase15_mid_no_endgame |
+| dr0p5 | 0.5 | 0.5 | 0.0 | phase15_mid_no_endgame |
+| dr1p0 | 1.0 | 0.5 | 0.0 | phase15_mid_no_endgame |
+| dr2p0 | 2.0 | 0.5 | 0.0 | phase15_mid_no_endgame |
+
+**Scripts:** `train_draw_reg_ablation.sh` (DRAW_REG env var) + `probe_draw_reg_ablation.sh`
+
+**Key metrics:** effective rank, W·D cosine, KR vs KR value, drawness gap (structural vs balanced).
+
+**Decision gate:** If rank and W·D cosine are flat across all conditions → draw-reg does not reshape geometry and we stop pursuing it as a mechanism. If the 0.0 baseline already shows good W·D cosine from ELO 2000 data alone → the data is doing the work, not the loss term.
+
+**Prerequisite:** ELO 2000 merge (`bsub -env "MIN_ELO=2000" < jobs/reeval_elo_ablation_merge.sh`) must complete first.
