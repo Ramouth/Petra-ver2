@@ -1145,3 +1145,46 @@ natural is now the best candidate for further work.
 - **Big data vs RL-inspired**: both push the PoC further. Big data is cheaper and more aligned with "data not hyperparameters." RL-inspired (rollout / self-play targets, MCTS-consumed drawness) is more sophisticated but expensive. Run big data in main track; RL-inspired as parallel exploration only if natural / v4 plateau.
 - **SF labels vs outcome labels**: v4 tests outcome-only. If v4 matches or exceeds natural, SF teacher signal can be retired. If v4 underperforms, SF stays.
 - **Curated curriculum vs raw scale**: natural was 477k curated. v4 is 5M raw. Whichever wins decides the data philosophy going forward.
+
+---
+
+## 2026-04-29 — Conceptual frame: rank is degrees of freedom
+
+User insight after the natural breakthrough: **"rank is like degrees of freedom — something you can sacrifice for new learning."**
+
+This reframes the whole project's metric story.
+
+### The map
+
+| Quantity | What it measures |
+|---|---|
+| Rank | Total degrees of freedom in the geometry. Capacity, not content. |
+| Cohen's d on Check 6 | One DoF committed to a specific concept (structural-vs-balanced). |
+| KR vs KR value gate | The committed direction is correct. |
+| ELO | Net effect — committed structure minus capacity loss. |
+
+### Why this explains natural
+
+`2021_06_all` had rank 87 of mostly diffuse, decision-irrelevant variance — opening clusters, ELO-band signatures, surface features. `natural`'s curriculum training **committed** capacity to encode "structural-draw vs balanced" (Cohen's d 1.83 on Check 6). The committed dimension cost rank (87 → 33.8). The committed direction is decision-relevant. Net: +150 ELO.
+
+### Predictive use
+
+- Runs that **don't drop rank** are NOT committing new capacity — they're refining existing structure (incremental learning).
+- Runs that **drop rank substantially** are doing fundamental reshape (commitment learning).
+- Big rank drops should correlate with big concept gains. If the rank drop isn't paid back by structure (Cohen's d, ELO), the run was wasted capacity.
+
+### Recipe implications
+
+- **Don't optimise rank.** Optimise useful structure per dimension.
+- **Accept rank loss** when training adds a decision-relevant concept.
+- **Track the triple**: rank + Cohen's d on Check 6 + ELO. Single-axis rank metric is misleading.
+- **Phase 1's rank→ELO finding** was true because all those models learned the same concept set. Across paradigms (different data, different concepts), rank alone is uninformative.
+
+### What this means for the writeup
+
+Two story layers:
+
+1. **Specific**: chess engines can be trained to distinguish structural draws from balanced positions (the PoC).
+2. **General**: geometric capacity is fungible — high rank without commitment is wasted; low rank with structure can outperform it. Rank trade-offs are productive, not destructive.
+
+Story 2 is the broader contribution — applicable to any representation-learning context, not just chess.
