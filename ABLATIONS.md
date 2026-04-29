@@ -11,6 +11,7 @@
 | 2B | Source ELO band | TBD | higher ELO → more genuine draws (hypothesis) |
 | 2C | SF draw blend fraction | TBD | direct draw injection vs ELO proxy |
 | 3 (draw dim) | Draw dimension opening | TBD | see section below |
+| 3C | Draw-reg weight (λ_draw) | TBD | round 1 invalid (drawness label bug); round 2 pending |
 
 ---
 
@@ -506,3 +507,95 @@ The original decisiveness hypothesis (memory: "Shallow SF depth → too few deci
 | 5% | — | — | — | — | — |
 | 20% | — | — | — | — | — |
 | 50% | — | — | — | — | — |
+
+---
+
+## Phase 3C — Draw Regularisation Weight Ablation (2026-04-29)
+
+**Question:** Does the draw-reg loss weight (λ_draw) reshape backbone geometry, or does it only train the drawness head in isolation?
+
+**Hypothesis:** Higher λ_draw → more gradient through the backbone via the BCE drawness loss → draw cluster opens / rank changes. If rank and W·D cosine are flat across conditions, draw-reg is not a geometry mechanism and should be abandoned as a path.
+
+**Init model:** `models/phase15_mid_no_endgame/best.pt` (rank 89.9)
+**Dataset:** `dataset_elo2000_sf18.pt` (train: 1,463,000 / val: 77,000)
+**Hyperparameters:** `--policy-weight 0.0 --rank-reg 0.5 --lr 3e-4 --epochs 20 --geo-patience 5 --num-workers 0`
+
+### Conditions
+
+| DRAW_REG | Model path |
+|----------|-----------|
+| 0.0 | `models/draw_reg_abl/dr0p0/best.pt` |
+| 0.2 | `models/draw_reg_abl/dr0p2/best.pt` |
+| 0.5 | `models/draw_reg_abl/dr0p5/best.pt` |
+| 1.0 | `models/draw_reg_abl/dr1p0/best.pt` |
+| 2.0 | `models/draw_reg_abl/dr2p0/best.pt` |
+
+### Round 1 — INVALID (drawness label bug)
+
+All 5 conditions trained on `dataset_elo2000_sf18.pt` with a critical drawness labelling error (see below). Results for conditions 0.2–2.0 are pending but will not be interpreted — the drawness signal was near-zero for all conditions, making the ablation a test of nothing.
+
+**Drawness label bug (discovered 2026-04-29):**
+
+The merge script used `--drawness-game-level --drawness-sf-threshold 0.11`. This requires the SF eval to NEVER exceed 0.11 tanh units (≈44 centipawns) for ANY sampled position in a drawn game. This inverts the correct null hypothesis.
+
+The correct framing: a drawn ELO 2000 game is presumptively drawn. Each position in that game is a drawness positive unless SF sees real imbalance at that specific moment (|SF| ≥ threshold). Tactical fluctuations in other parts of the game are irrelevant to whether this position is drawn.
+
+Result of the bug: only **2,186 drawness positives from 1,540,000 positions (0.14%)**. The draw-reg loss was essentially silent for 99.86% of training steps. No condition could show any effect.
+
+**Fix:** Remove `--drawness-game-level`. Use position-level with `--drawness-sf-threshold 0.22` (≈90cp). Criterion: game outcome = draw AND |SF eval at this position| < 0.22. Expected yield: ~50–100k positives.
+
+### DRAW_REG=0.0 — Probe Results (Job 28327364, 2026-04-29)
+
+Trained 7 epochs (geometry patience exhausted). Probed on `dataset_2021_06_mid_sf18.pt` (n=5000).
+
+| Metric | Value |
+|--------|-------|
+| Effective rank | **78.9** / 128 |
+| win·draw cosine (strict) | −0.124 |
+| win·loss cosine (strict) | −0.572 |
+| loss·draw cosine (strict) | +0.409 |
+| Separation gap | 0.187 |
+| NN label lift | +0.363 |
+| Check 6 LR accuracy | 0.990 |
+| Check 6 Cohen's d (PC1) | **4.575** |
+| Top separating dims | [101, 48, 80, 10, 84] |
+| Topology β1 | 191 |
+| Drawness gates passed | 0 / 4 (head untrained) |
+| KR vs KR value | +0.149 |
+
+**Key observations:**
+
+1. **Rank 78.9 is healthy** — 11 points below the phase15_mid_no_endgame init (89.9), but well above the 30-point threshold. The ELO 2000 data partially relaxed the geometry but did not damage it.
+
+2. **Check 6 Cohen's d improved: 3.769 → 4.575.** The structural draw / balanced position separation strengthened after 7 epochs of ELO 2000 training with zero drawness supervision. The higher-quality game data appears to sharpen the equal-region structure. Separating dims [101, 48, 84] are stable across init and trained models — these are the core draw-encoding axes.
+
+3. **win·draw cosine −0.124** is marginally more negative than the init (−0.107). Draws are slightly more separated from wins after ELO 2000 training. The loss·draw collinearity (+0.409) persists — draws are still geometrically closer to losses than to wins, which is structurally expected from the STM-relative value framing.
+
+4. **Drawness head: all outputs ≈ 0.52** (random init). With DRAW_REG=0.0, the head received zero gradient. This confirms that Check 6 separability (99%) is purely a backbone property — the information is there but the head cannot read it without supervision.
+
+5. **KNN vs K value = +0.851** — the model reads material (two knights vs one king) as winning, which is geometrically correct for a material-heavy position but wrong for a known fortress draw. This is the exact failure mode the drawness head should correct.
+
+### Round 2 — Pending
+
+After conditions 0.2–2.0 complete (for completeness), re-merge with corrected labels and retrain all 5 conditions. The Round 2 ablation will be the valid experiment.
+
+**Round 2 submit commands (after re-merge):**
+```bash
+bsub -env "MIN_ELO=2000" < jobs/reeval_elo_ablation_merge.sh   # re-merge with fixed labels
+# then retrain:
+bsub -env "DRAW_REG=0.0" < jobs/train_draw_reg_ablation.sh
+bsub -env "DRAW_REG=0.2" < jobs/train_draw_reg_ablation.sh
+bsub -env "DRAW_REG=0.5" < jobs/train_draw_reg_ablation.sh
+bsub -env "DRAW_REG=1.0" < jobs/train_draw_reg_ablation.sh
+bsub -env "DRAW_REG=2.0" < jobs/train_draw_reg_ablation.sh
+```
+
+### Results Table (Round 1 — invalid)
+
+| DRAW_REG | Epochs | Rank (probe) | W·D cos | Cohen's d | Drawness gates | ELO Δ vs phase15_noe |
+|----------|--------|-------------|---------|-----------|----------------|----------------------|
+| 0.0 | 7 | 78.9 | −0.124 | 4.575 | 0/4 | pending |
+| 0.2 | — | — | — | — | — | — |
+| 0.5 | — | — | — | — | — | — |
+| 1.0 | — | — | — | — | — | — |
+| 2.0 | — | — | — | — | — | — |
