@@ -8,17 +8,23 @@ set -euo pipefail
 #BSUB -o /zhome/81/b/206091/logs/probe_drawness_head_%J.out
 #BSUB -e /zhome/81/b/206091/logs/probe_drawness_head_%J.err
 
-# Probe a drawness model. Set VARIANT to select which model:
-#   bsub -env "VARIANT=head" < jobs/probe_drawness_head.sh   # frozen backbone
-#   bsub -env "VARIANT=full" < jobs/probe_drawness_head.sh   # unfrozen backbone
+# Probe a drawness model. Two ways to pick the model:
+#   VARIANT=head|full|head_v2  → models/drawness_${VARIANT}/best.pt
+#   MODEL_DIR=<dir>            → models/${MODEL_DIR}/best.pt  (overrides VARIANT)
+#
+#   bsub -env "VARIANT=head"          < jobs/probe_drawness_head.sh
+#   bsub -env "VARIANT=full"          < jobs/probe_drawness_head.sh
+#   bsub -env "MODEL_DIR=natural"     < jobs/probe_drawness_head.sh
+#   bsub -env "MODEL_DIR=soft_drawness" < jobs/probe_drawness_head.sh
 
 VARIANT="${VARIANT:-head}"
+MODEL_DIR="${MODEL_DIR:-drawness_${VARIANT}}"
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
-MODEL="${HOME_DIR}/Petra-ver2/models/drawness_${VARIANT}/best.pt"
+MODEL="${HOME_DIR}/Petra-ver2/models/${MODEL_DIR}/best.pt"
 PROBE_DATASET="${BLACKHOLE}/dataset_2021_06_mid_sf18.pt"
 
 echo "=== Drawness head probe ==="
