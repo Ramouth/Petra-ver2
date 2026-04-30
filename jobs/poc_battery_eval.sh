@@ -1,10 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 #BSUB -J poc_battery_eval
-#BSUB -q gpua100
-#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -q hpc
 #BSUB -n 4
-#BSUB -R "rusage[mem=8GB]"
+#BSUB -R "rusage[mem=4GB]"
 #BSUB -W 0:30
 #BSUB -o /zhome/81/b/206091/logs/poc_battery_eval_%J.out
 #BSUB -e /zhome/81/b/206091/logs/poc_battery_eval_%J.err
