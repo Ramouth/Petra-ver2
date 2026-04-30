@@ -37,6 +37,7 @@ import os
 import random
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import List, NamedTuple
@@ -245,6 +246,12 @@ def parse_pgn(pgn_path: str,
     t0 = time.time()
     last_game_id = -1
 
+    # Register live buffers + ckpt path so the watchdog can do an emergency
+    # save before forcing the process out.
+    _progress["save_args"] = (tensor_buf, value_buf, move_idx_buf,
+                              fens, game_ids, plys)
+    _progress["ckpt_path"] = checkpoint_path
+
     for game_id, result, sampled_pairs in _iter_games(
             pgn_path, max_games, min_elo, require_normal_termination, rng,
             skip_opening=skip_opening, positions_per_game=positions_per_game,
@@ -269,6 +276,10 @@ def parse_pgn(pgn_path: str,
             count += 1
 
         last_game_id = game_id
+        # Watchdog reads these to detect stalls.
+        _progress["n_games"]     = game_id + 1
+        _progress["n_positions"] = count
+
         if (game_id + 1) % 10_000 == 0:
             elapsed = time.time() - t0
             print(f"  {game_id+1:,} games, {count:,} positions, {elapsed:.0f}s")
@@ -576,6 +587,73 @@ def _handle_sigterm(signum, frame):
     _stop_early = True
 
 
+# Stall watchdog: fires when the parse loop stops advancing.
+# Catches python-chess hangs in C (where signal handlers don't run) and any
+# upstream stall that would otherwise burn the whole wall budget for nothing.
+_progress = {
+    "n_games":        0,
+    "n_positions":    0,
+    "t_last_advance": 0.0,
+    "save_args":      None,   # tuple of buffer refs for emergency ckpt
+    "ckpt_path":      "",
+}
+_watchdog_started = False
+
+
+def _watchdog_loop(stall_warn_secs: int, stall_kill_secs: int, poll_secs: int = 30):
+    global _stop_early
+    last_n = -1
+    while True:
+        time.sleep(poll_secs)
+        if _stop_early:
+            return
+        cur_n = _progress["n_games"]
+        if cur_n != last_n:
+            last_n = cur_n
+            _progress["t_last_advance"] = time.time()
+            continue
+        idle = time.time() - _progress["t_last_advance"]
+        if idle > stall_kill_secs:
+            print(f"\n[watchdog] no progress for {idle:.0f}s "
+                  f"(>{stall_kill_secs}s) — forcing exit. Slot freed.",
+                  flush=True)
+            sa = _progress.get("save_args")
+            ckpt = _progress.get("ckpt_path")
+            if sa is not None and ckpt:
+                try:
+                    _save_raw_checkpoint(*sa,
+                                         _progress["n_positions"],
+                                         _progress["n_games"],
+                                         ckpt)
+                except Exception as e:
+                    print(f"[watchdog] emergency ckpt failed: {e}", flush=True)
+            os._exit(124)
+        elif idle > stall_warn_secs:
+            print(f"\n[watchdog] no progress for {idle:.0f}s "
+                  f"(>{stall_warn_secs}s) — requesting graceful exit.",
+                  flush=True)
+            _stop_early = True
+
+
+def _start_watchdog(stall_warn_secs: int, stall_kill_secs: int,
+                    initial_grace_secs: int = 1800):
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _progress["t_last_advance"] = time.time() + initial_grace_secs
+    _watchdog_started = True
+    t = threading.Thread(
+        target=_watchdog_loop,
+        args=(stall_warn_secs, stall_kill_secs),
+        daemon=True,
+        name="parse-watchdog",
+    )
+    t.start()
+    print(f"[watchdog] active: warn @ {stall_warn_secs}s idle, "
+          f"hard exit @ {stall_kill_secs}s. Initial grace {initial_grace_secs}s "
+          f"(covers PGN fast-forward).", flush=True)
+
+
 def _save_raw_checkpoint(tensor_buf, value_buf, move_idx_buf, fens,
                          game_ids, plys, count, n_games, path):
     """
@@ -645,6 +723,9 @@ def main():
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT,  _handle_sigterm)
 
+    # Args parsed below; we start the watchdog after parsing so its thresholds
+    # are configurable. See `_start_watchdog` call further down.
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--pgn",           required=False,       help="Path to PGN file")
     ap.add_argument("--out",           default="dataset.pt", help="Output .pt path")
@@ -675,6 +756,17 @@ def main():
     ap.add_argument("--decisive-only",  action="store_true",
                     help="Skip drawn games (result=1/2-1/2). "
                          "Maximises decisive SF labels for geometry bootstrap.")
+    ap.add_argument("--stall-warn-secs", type=int, default=600,
+                    help="Watchdog: print warning + request graceful exit "
+                         "if no game advances for this many seconds (default 600 = 10 min).")
+    ap.add_argument("--stall-kill-secs", type=int, default=1200,
+                    help="Watchdog: emergency save + force exit if idle exceeds "
+                         "this many seconds (default 1200 = 20 min).")
+    ap.add_argument("--watchdog-grace-secs", type=int, default=1800,
+                    help="Initial grace window before watchdog can fire (covers "
+                         "PGN fast-forward for skip-games). Default 1800 = 30 min.")
+    ap.add_argument("--no-watchdog", action="store_true",
+                    help="Disable the stall watchdog.")
     ap.add_argument("--checkpoint-every", type=int, default=10_000,
                     help="Save a raw checkpoint every N games (default 10000). "
                          "Survives SIGKILL at wall-time. Set 0 to disable.")
@@ -728,6 +820,10 @@ def main():
         return
 
     ckpt_path = args.out.replace(".pt", ".ckpt.pt") if args.checkpoint_every > 0 else ""
+
+    if not args.no_watchdog and not args.from_checkpoint and not args.merge_raw:
+        _start_watchdog(args.stall_warn_secs, args.stall_kill_secs,
+                        initial_grace_secs=args.watchdog_grace_secs)
 
     if args.from_checkpoint:
         print(f"Loading checkpoint: {args.from_checkpoint}")
