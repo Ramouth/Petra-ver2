@@ -5,32 +5,36 @@ set -euo pipefail
 #BSUB -n 1
 #BSUB -R "rusage[mem=16GB]"
 #BSUB -W 24:00
-#BSUB -o /zhome/81/b/206091/logs/parse_2025_02_2400_%J.out
-#BSUB -e /zhome/81/b/206091/logs/parse_2025_02_2400_%J.err
+#BSUB -o /zhome/81/b/206091/logs/parse_2025_02_2400_c%I_%J.out
+#BSUB -e /zhome/81/b/206091/logs/parse_2025_02_2400_c%I_%J.err
 
-# Parse Lichess 2025-02 at min_elo=2400. Sister run to parse_2025_04_2400.sh
-# — independent month, runs in parallel (no shared resources). Combined
-# output feeds build_big.
+# Parse Lichess 2025-02 at min_elo=2400, ONE OF THREE CHUNKS.
+# Submit three times with CHUNK_IDX=0/1/2 — they run in parallel.
 #
-# 300k qualifying games × 20 positions/game = ~6M raw positions per month.
-# Two months → ~12M raw → comfortable headroom for 5M @ 7.5% drawn after
-# FEN-dedup against the other month.
+# Each chunk takes 100k games, total target = 300k games per month
+# (= ~6M raw positions). With chunking we can submit two months × 3
+# chunks = 6 parallel parses, dropping wall time from ~24h to ~3-4h.
 #
-#   bsub < jobs/parse_2025_02_2400.sh
+#   bsub -env "CHUNK_IDX=0" < jobs/parse_2025_02_2400.sh
+#   bsub -env "CHUNK_IDX=1" < jobs/parse_2025_02_2400.sh
+#   bsub -env "CHUNK_IDX=2" < jobs/parse_2025_02_2400.sh
 
 YEAR=2025
 MONTH=02
 MIN_ELO=2400
-MAX_GAMES=300000
+GAMES_PER_CHUNK=100000
+
+CHUNK_IDX="${CHUNK_IDX:?CHUNK_IDX must be set (0, 1, or 2)}"
+SKIP_GAMES=$(( CHUNK_IDX * GAMES_PER_CHUNK ))
 
 BLACKHOLE="/dtu/blackhole/0b/206091"
 HOME_DIR="/zhome/81/b/206091"
 SRC="${HOME_DIR}/Petra-ver2/src"
 
 PGN_FILE="${BLACKHOLE}/lichess_db_standard_rated_${YEAR}-${MONTH}.pgn.zst"
-OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}.pt"
+OUT_FILE="${BLACKHOLE}/dataset_${YEAR}_${MONTH}_chunk${CHUNK_IDX}.pt"
 
-echo "=== Parsing Lichess ${YEAR}-${MONTH} (min_elo=${MIN_ELO}, max_games=${MAX_GAMES}) ==="
+echo "=== Parsing Lichess ${YEAR}-${MONTH} chunk ${CHUNK_IDX} (skip=${SKIP_GAMES}, take=${GAMES_PER_CHUNK}, min_elo=${MIN_ELO}) ==="
 echo "PGN:  ${PGN_FILE}"
 echo "Out:  ${OUT_FILE}"
 echo
@@ -46,14 +50,16 @@ pip install zstandard --quiet
 python3 -u "${SRC}/data.py" \
     --pgn                "${PGN_FILE}" \
     --out                "${OUT_FILE}" \
-    --max-games          ${MAX_GAMES} \
+    --skip-games         ${SKIP_GAMES} \
+    --max-games          ${GAMES_PER_CHUNK} \
     --min-elo            ${MIN_ELO} \
     --positions-per-game 20 \
     --skip-opening       5 \
     --sampling           even \
+    --no-split           \
     --no-strict          \
     --checkpoint-every   10000
 
 echo
-echo "Done. Output: ${OUT_FILE}"
-echo "Next: bsub < jobs/build_big.sh   (after parse_2025_04 also done)"
+echo "Done. Chunk: ${OUT_FILE}"
+echo "After all 3 chunks finish, merge with: bsub -env \"MONTH=${MONTH}\" < jobs/merge_2025_chunks.sh"
