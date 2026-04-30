@@ -226,12 +226,16 @@ def merge_datasets(primary_data: dict, extra_path: str) -> dict:
             "tensors":   torch.cat([a["tensors"],   b["tensors"]]),
             "values":    torch.cat([a["values"],     b["values"]]),
             "move_idxs": torch.cat([a["move_idxs"],  b["move_idxs"]]),
-            "visit_dists": torch.cat([_ensure_visit_dists(a),
-                                      _ensure_visit_dists(b)]),
             "drawness_mask": torch.cat([a_draw_mask, b_draw_mask]),
             "drawness_targets": torch.cat([a_draw_targets, b_draw_targets]),
             "drawness_available": torch.cat([a_draw_available, b_draw_available]),
         }
+        # Only materialize visit_dists when at least one side has them stored.
+        # Otherwise leave the field absent so _make_loader builds one-hot per batch
+        # (a (N, 4096) float32 is ~104 GB at 6.35M rows — same lazy fix as load_dataset).
+        if "visit_dists" in a or "visit_dists" in b:
+            merged["visit_dists"] = torch.cat([_ensure_visit_dists(a),
+                                               _ensure_visit_dists(b)])
         if "legal_masks" in a or "legal_masks" in b:
             # If one side is missing masks, substitute all-ones (0xFF = all bits
             # set = all moves legal = no masking effect for those positions).
