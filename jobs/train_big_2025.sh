@@ -5,7 +5,7 @@ set -euo pipefail
 #BSUB -n 4
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -R "rusage[mem=32GB] span[hosts=1]"
-#BSUB -W 24:00
+#BSUB -W 2:00
 #BSUB -o /zhome/81/b/206091/logs/train_big_2025_%J.out
 #BSUB -e /zhome/81/b/206091/logs/train_big_2025_%J.err
 
