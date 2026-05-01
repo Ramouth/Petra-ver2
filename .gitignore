@@ -41,3 +41,6 @@ Thumbs.db
 
 # Model checkpoint backups — track via Git LFS or external storage, not regular git
 models_backup/*.pt
+
+# Outreach drafts (private — emails, briefs, interview prep)
+outreach/
