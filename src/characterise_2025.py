@@ -18,6 +18,7 @@ Usage
 """
 
 import argparse
+import gc
 import os
 import sys
 
@@ -62,20 +63,27 @@ def characterise(path: str) -> None:
         print(f"  MISSING: {path}")
         return
 
-    all_t, all_v, src = [], [], None
+    # Stream split-by-split to avoid holding both train and val tensors
+    # at full scale alongside torch.load's other dict entries.
+    pieces_chunks = []
+    values_chunks = []
+    src = None
     for split in ("train", "val"):
         try:
             t, v, s = load_split(path, split)
         except KeyError as e:
             print(f"  ERROR reading split={split}: {e}")
             return
-        all_t.append(t)
-        all_v.append(v)
         src = s
+        pieces_chunks.append(t[:, :12].sum(dim=(1, 2, 3)).to(torch.int16).numpy())
+        values_chunks.append(v.numpy().astype(np.float32))
+        del t, v
+        gc.collect()
 
-    tensors = torch.cat(all_t)
-    values  = torch.cat(all_v).numpy()
-    pieces  = tensors[:, :12].sum(dim=(1, 2, 3)).float().numpy()
+    pieces = np.concatenate(pieces_chunks).astype(np.float32)
+    values = np.concatenate(values_chunks)
+    del pieces_chunks, values_chunks
+    gc.collect()
     N = len(values)
 
     print(f"\n  Positions: {N:,}   (label source: {src})")
@@ -127,6 +135,9 @@ def characterise(path: str) -> None:
         print(f"    overall mean pieces: {all_pieces.mean():.1f}")
         print(f"    delta:               {draw_pieces.mean() - all_pieces.mean():+.2f}")
         print(f"    (negative = draws skew toward endgame; positive = toward opening/midgame)")
+
+    del pieces, values, cls
+    gc.collect()
 
 
 def main():
