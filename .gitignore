@@ -38,3 +38,6 @@ Thumbs.db
 # HPC job outputs
 *.lsf
 .loop_workdir/
+
+# Model checkpoint backups — track via Git LFS or external storage, not regular git
+models_backup/*.pt
