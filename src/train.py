@@ -913,6 +913,8 @@ def train(dataset_path: str = None,
                 sys.exit(3)  # 3 = topological abort (distinct from other exits)
 
         torch.save(model.state_dict(), os.path.join(out_dir, "latest.pt"))
+        torch.save(model.state_dict(),
+                   os.path.join(out_dir, f"epoch_{epoch:02d}.pt"))
 
         # Full training-state checkpoint — enables true resume on HPC preemption
         torch.save({
