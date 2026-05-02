@@ -624,8 +624,21 @@ def train(dataset_path: str = None,
           rank_reg: float = 0.0,
           draw_reg: float = 0.0,
           freeze_backbone: bool = False,
+          freeze_trunk_train_policy: bool = False,
+          cold_init_policy: bool = False,
           init_drawness_lr: bool = False,
           use_soft_drawness: bool = False):
+
+    if freeze_backbone and freeze_trunk_train_policy:
+        raise ValueError(
+            "--freeze-backbone (drawness-only) and --freeze-trunk-train-policy "
+            "are mutually exclusive — pick the head you want to train."
+        )
+    if freeze_trunk_train_policy and (rank_reg > 0 or draw_reg > 0):
+        print(f"WARNING: rank_reg={rank_reg} draw_reg={draw_reg} have no effect "
+              f"with frozen trunk (no gradient path) — zeroing both.")
+        rank_reg = 0.0
+        draw_reg = 0.0
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -742,12 +755,25 @@ def train(dataset_path: str = None,
     n_params = sum(p.numel() for p in model.parameters())
     print(f"PetraNet: {n_params:,} parameters  |  device: {device}")
 
+    if cold_init_policy:
+        # Discard any policy_head weights from init_model — for §2 frozen-trunk
+        # retrain when the source checkpoint's policy head is unusable noise.
+        model.policy_head.reset_parameters()
+        print("Cold-initialised policy_head (reset_parameters) — discarded loaded weights")
+
     if freeze_backbone:
         for name, param in model.named_parameters():
             if "drawness_head" not in name:
                 param.requires_grad = False
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Backbone frozen — training drawness_head only ({n_trainable} parameters)")
+
+    if freeze_trunk_train_policy:
+        for name, param in model.named_parameters():
+            if "policy_head" not in name:
+                param.requires_grad = False
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Trunk frozen — training policy_head only ({n_trainable} parameters)")
 
     if init_drawness_lr:
         print("Initialising drawness head from logistic regression on training geometry ...")
@@ -1084,6 +1110,16 @@ def main():
                          "geometry before training begins. Finds the existing draw direction "
                          "analytically instead of relying on BCE convergence from random init. "
                          "Most useful with --freeze-backbone where the backbone won't reshape.")
+    ap.add_argument("--freeze-trunk-train-policy", action="store_true",
+                    help="Freeze all parameters except policy_head. "
+                         "For Phase 2 §2 — trains only the policy_head linear "
+                         "layer on a frozen value trunk + value/drawness heads. "
+                         "Mutually exclusive with --freeze-backbone. Auto-zeros "
+                         "rank_reg and draw_reg (no gradient path through trunk).")
+    ap.add_argument("--cold-init-policy", action="store_true",
+                    help="After --init-model loads, reset policy_head to fresh "
+                         "weights via nn.Linear.reset_parameters(). Use when the "
+                         "source checkpoint's policy head is untrained noise.")
     ap.add_argument("--soft-drawness-targets", action="store_true",
                     dest="use_soft_drawness",
                     help="Use the dataset's drawness_soft_targets field (built by "
@@ -1118,6 +1154,8 @@ def main():
         rank_reg=args.rank_reg,
         draw_reg=args.draw_reg,
         freeze_backbone=args.freeze_backbone,
+        freeze_trunk_train_policy=args.freeze_trunk_train_policy,
+        cold_init_policy=args.cold_init_policy,
         init_drawness_lr=args.init_drawness_lr,
         use_soft_drawness=args.use_soft_drawness,
     )
