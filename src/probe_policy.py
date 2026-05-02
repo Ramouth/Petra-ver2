@@ -1,28 +1,34 @@
 """
 Policy head probe for PetraNet.
 
-Diagnoses the state of the policy head BEFORE building the new policy
-training pipeline (Phase 2 §2). Inference is masked in model.policy()
-but training is unmasked — so the raw 4096-dim logit distribution may
-have most of its mass on illegal moves, with the masked output being
-just whatever leaks through.
+Diagnoses the state of the policy head — primarily by Top-k accuracy
+against the SF best move stored in the dataset (move_idxs).
 
-This probe answers three questions:
+PRIMARY GATE: Top1 / Top5 vs SF best
+  These measure whether masked argmax matches what MCTS would want
+  to expand first. Random baseline at median n_legal=31 is ~1/31 ≈ 0.03.
 
-  1. Where is the raw logit mass?
-       illegal_mass = 1 - sum(softmax(raw_logits)[legal_indices])
-       0.95+   policy is essentially predicting illegal moves
-       0.5–0.95 partial leakage
-       <0.5    head has learned legality despite no training signal
+    Top1 < 0.05  DEAD     (head not informative)
+    Top1 < 0.20  WEAK     (above random but below MCTS-useful threshold)
+    Top1 < 0.40  ALIVE    (MCTS-useful range)
+    Top1 ≥ 0.40  STRONG
 
-  2. Is the masked policy alive or collapsed?
-       entropy of masked softmax over legal moves only
-       very low → collapsed (always argmax to one move regardless)
-       very high → alive but undirected (uniform over legal)
-       mid-range with variance across positions → contextual
+DIAGNOSTICS (not a gate):
+  illegal_mass = 1 - sum(softmax(raw_logits)[legal_indices])
+    With masked-CE training, illegal logits receive ZERO gradient
+    (mask sets them to -inf in the loss; the targets are zero on
+    illegal indices). illegal_mass therefore stays at the random
+    baseline (~n_illegal / 4096 ≈ 0.995) regardless of how well
+    the head learned. Useful only as a sanity check for unmasked
+    training pipelines.
 
-  3. Does the picture vary by phase?
-       opening (>26 pieces) / middle (12–26) / endgame (<12)
+  masked_entropy / log(n_legal)
+    How peaked the masked distribution is. Affects MCTS exploration
+    breadth but a flat distribution can still match SF top-1 by a
+    small margin — Top1 is the load-bearing metric, not entropy.
+
+  per-phase breakdown
+    opening (>26 pieces) / middle (12–26) / endgame (<12)
 
 Usage
 -----
@@ -64,12 +70,14 @@ def phase_of(board: chess.Board) -> str:
 # Per-position measurement
 # ---------------------------------------------------------------------------
 
-def probe_one(model: PetraNet, board: chess.Board) -> dict:
+def probe_one(model: PetraNet, board: chess.Board, sf_best_idx: int) -> dict:
     """
     Run the policy head on a single board and extract:
-      - illegal_mass: raw softmax probability on illegal-move indices
-      - masked_entropy: entropy of softmax over legal moves only (nats)
-      - n_legal: number of legal moves (denominator for entropy interpretation)
+      - top1_match / top5_match: argmax (top-5) of masked policy matches SF best
+                                 None when sf_best_idx < 0 (SF eval failed)
+      - illegal_mass: raw softmax probability on illegal-move indices (diagnostic)
+      - masked_entropy: entropy of softmax over legal moves only (nats, diagnostic)
+      - n_legal: number of legal moves
       - phase: coarse opening/middle/endgame tag
     """
     t = board_to_tensor(board).unsqueeze(0).to(device)
@@ -82,7 +90,7 @@ def probe_one(model: PetraNet, board: chess.Board) -> dict:
         dtype=torch.long, device=device,
     )
 
-    # Raw distribution over all 4096 outputs
+    # Raw distribution over all 4096 outputs (diagnostic only)
     raw_probs = torch.softmax(logits, dim=0)
     legal_mass = raw_probs[legal_idx].sum().item()
     illegal_mass = 1.0 - legal_mass
@@ -95,7 +103,20 @@ def probe_one(model: PetraNet, board: chess.Board) -> dict:
     p = p[p > 0]
     masked_entropy = float(-(p * torch.log(p + 1e-12)).sum().item())
 
+    # Top-k vs SF best — primary gate
+    if sf_best_idx >= 0:
+        top1_idx = int(masked_probs.argmax().item())
+        top1_match = (top1_idx == sf_best_idx)
+        k = min(5, int(legal_idx.numel()))
+        top5_idxs = masked_probs.topk(k).indices.tolist()
+        top5_match = sf_best_idx in top5_idxs
+    else:
+        top1_match = None
+        top5_match = None
+
     return {
+        "top1_match":     top1_match,
+        "top5_match":     top5_match,
         "illegal_mass":   float(illegal_mass),
         "masked_entropy": masked_entropy,
         "n_legal":        int(legal_idx.numel()),
@@ -118,6 +139,14 @@ def percentiles(xs):
     }
 
 
+def _hit_rate(rows, key):
+    """Mean of boolean key, skipping rows where the value is None."""
+    vals = [r[key] for r in rows if r[key] is not None]
+    if not vals:
+        return None
+    return float(np.mean(vals))
+
+
 def summarise(rows: list) -> dict:
     """Produce overall and per-phase summaries."""
     illegal = [r["illegal_mass"]   for r in rows]
@@ -127,9 +156,13 @@ def summarise(rows: list) -> dict:
         r["masked_entropy"] / r["max_entropy"] if r["max_entropy"] > 0 else 0.0
         for r in rows
     ]
+    n_with_sf = sum(1 for r in rows if r["top1_match"] is not None)
 
     overall = {
         "n":                      len(rows),
+        "n_with_sf_target":       n_with_sf,
+        "top1_hit":               _hit_rate(rows, "top1_match"),
+        "top5_hit":               _hit_rate(rows, "top5_match"),
         "illegal_mass":           percentiles(illegal),
         "masked_entropy":         percentiles(entropy),
         "masked_entropy_norm":    percentiles(norm_entropy),
@@ -143,6 +176,8 @@ def summarise(rows: list) -> dict:
             continue
         by_phase[ph] = {
             "n":                   len(sub),
+            "top1_hit":            _hit_rate(sub, "top1_match"),
+            "top5_hit":            _hit_rate(sub, "top5_match"),
             "illegal_mass":        percentiles([r["illegal_mass"]   for r in sub]),
             "masked_entropy":      percentiles([r["masked_entropy"] for r in sub]),
             "masked_entropy_norm": percentiles(
@@ -159,27 +194,23 @@ def summarise(rows: list) -> dict:
 # ---------------------------------------------------------------------------
 
 def verdict(summary: dict) -> str:
-    """Translate the headline numbers into a one-line diagnosis."""
-    illegal_p50 = summary["overall"]["illegal_mass"]["p50"]
-    norm_ent_p50 = summary["overall"]["masked_entropy_norm"]["p50"]
+    """Translate the headline number into a one-line diagnosis."""
+    top1 = summary["overall"]["top1_hit"]
+    top5 = summary["overall"]["top5_hit"]
 
-    parts = []
+    if top1 is None:
+        return "NO SF TARGETS (cannot grade — dataset move_idxs all -1)"
 
-    if illegal_p50 > 0.95:
-        parts.append("DEAD (raw logits dominated by illegal moves)")
-    elif illegal_p50 > 0.5:
-        parts.append("LEAKY (substantial illegal-move mass)")
+    if top1 < 0.05:
+        band = "DEAD     (Top1 ≈ random — head not informative)"
+    elif top1 < 0.20:
+        band = "WEAK     (above random but below MCTS-useful threshold)"
+    elif top1 < 0.40:
+        band = "ALIVE    (MCTS-useful range)"
     else:
-        parts.append("LEGAL-AWARE (most raw mass on legal moves)")
+        band = "STRONG   (Top1 ≥ 0.40)"
 
-    if norm_ent_p50 > 0.9:
-        parts.append("UNDIRECTED (masked entropy near uniform)")
-    elif norm_ent_p50 < 0.2:
-        parts.append("COLLAPSED (masked entropy near zero)")
-    else:
-        parts.append("CONTEXTUAL (masked entropy mid-range)")
-
-    return " + ".join(parts)
+    return f"{band}  |  Top1={top1:.3f}  Top5={top5:.3f}"
 
 
 # ---------------------------------------------------------------------------
@@ -191,20 +222,29 @@ def _fmt_pct(d):
             f"p90={d['p90']:.3f}  mean={d['mean']:.3f}")
 
 
+def _fmt_hit(x):
+    return f"{x:.3f}" if x is not None else "n/a"
+
+
 def print_summary(summary: dict, verdict_str: str):
     o = summary["overall"]
     print("\n" + "=" * 68)
     print("POLICY PROBE — overall")
     print("=" * 68)
-    print(f"  n positions      : {o['n']}")
-    print(f"  median n_legal   : {o['median_n_legal']:.0f}")
-    print(f"  illegal_mass     : {_fmt_pct(o['illegal_mass'])}")
-    print(f"  masked entropy   : {_fmt_pct(o['masked_entropy'])}")
+    print(f"  n positions       : {o['n']}  (with SF target: {o['n_with_sf_target']})")
+    print(f"  median n_legal    : {o['median_n_legal']:.0f}")
+    print(f"  Top1 vs SF best   : {_fmt_hit(o['top1_hit'])}   (random ≈ 1/median_n_legal)")
+    print(f"  Top5 vs SF best   : {_fmt_hit(o['top5_hit'])}")
+    print(f"  -- diagnostics (not gates) --")
+    print(f"  illegal_mass      : {_fmt_pct(o['illegal_mass'])}")
+    print(f"  masked entropy    : {_fmt_pct(o['masked_entropy'])}")
     print(f"  entropy / log(n_legal) : {_fmt_pct(o['masked_entropy_norm'])}")
 
     print("\n  by phase:")
     for ph, s in summary["by_phase"].items():
         print(f"    {ph:8s}  n={s['n']:4d}  "
+              f"Top1={_fmt_hit(s['top1_hit'])}  "
+              f"Top5={_fmt_hit(s['top5_hit'])}  "
               f"illegal_p50={s['illegal_mass']['p50']:.3f}  "
               f"norm_ent_p50={s['masked_entropy_norm']['p50']:.3f}")
 
@@ -239,6 +279,7 @@ def main():
     data  = torch.load(args.dataset, map_location="cpu", weights_only=False)
     split = data["val"]
     fens  = split["fens"][:args.n]
+    move_idxs = split["move_idxs"][:args.n].tolist() if "move_idxs" in split else [-1] * len(fens)
     print(f"Probing {len(fens)} val positions from {args.dataset}")
 
     rows = []
@@ -249,7 +290,7 @@ def main():
             continue
         if board.is_game_over() or not any(board.legal_moves):
             continue
-        rows.append(probe_one(model, board))
+        rows.append(probe_one(model, board, sf_best_idx=int(move_idxs[i])))
         if (i + 1) % 100 == 0:
             print(f"  [{i+1:5d}/{len(fens)}]")
 
