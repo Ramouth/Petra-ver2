@@ -639,6 +639,12 @@ def train(dataset_path: str = None,
               f"with frozen trunk (no gradient path) — zeroing both.")
         rank_reg = 0.0
         draw_reg = 0.0
+    if freeze_trunk_train_policy:
+        # Geometry patience watches rank/wdcos — neither can move with a frozen
+        # trunk, so the early-stop would always fire. Disable by pushing the
+        # threshold past the epoch budget; --epochs becomes the only stop.
+        # Best.pt is saved on val_loss improvement instead (see val loop).
+        geo_patience = epochs + 1
 
     from generate_endgame import generate_positions, build_dataset as _build_eg
 
@@ -834,8 +840,12 @@ def train(dataset_path: str = None,
         else:
             print(f"Drawness regularisation: λ={draw_reg}  "
                   f"(BCE — explicit structural draws vs decisive positions)")
-    print(f"Geometry patience: {geo_patience} epochs  "
-          f"(stops when rank and win·draw cosine both plateau)\n")
+    if freeze_trunk_train_policy:
+        print(f"Frozen-trunk policy mode: best.pt tracks val_loss; "
+              f"geo-patience disabled (--epochs is the only stop).\n")
+    else:
+        print(f"Geometry patience: {geo_patience} epochs  "
+              f"(stops when rank and win·draw cosine both plateau)\n")
     rank_col = f"  {'RankL':>6}" if rank_reg > 0 else ""
     draw_col = f"  {'DrawL':>6}" if draw_reg > 0 else ""
     print(f"{'Epoch':>5}  {'T-loss':>7}  {'V-loss':>7}  {'V-MSE':>6}  "
@@ -865,8 +875,14 @@ def train(dataset_path: str = None,
         lr_now  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
 
-        if val_m["loss"] < best_val_loss:
+        val_loss_improved = val_m["loss"] < best_val_loss
+        if val_loss_improved:
             best_val_loss = val_m["loss"]
+            if freeze_trunk_train_policy:
+                # Frozen-trunk policy mode: rank/wdcos are static, so the
+                # geometry-block's best.pt save can't fire. Save here on
+                # val_loss improvement instead.
+                torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
 
         rank_str = f"  {val_m['rank_loss']:>6.4f}" if rank_reg > 0 else ""
         draw_str = f"  {val_m['draw_loss']:>6.4f}" if draw_reg > 0 else ""
@@ -909,16 +925,23 @@ def train(dataset_path: str = None,
                 best_draw_gap = draw["gap"]
             # best.pt requires rank OR drawness improvement, plus healthy topology.
             # When backbone is frozen, rank won't move — drawness is the gating signal.
-            if (rank_improved or draw_improved) and last_topo_healthy:
+            if (rank_improved or draw_improved) and last_topo_healthy and not freeze_trunk_train_policy:
                 torch.save(model.state_dict(), os.path.join(out_dir, "best.pt"))
                 print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ new best")
+            elif freeze_trunk_train_policy:
+                marker = "  ↑ policy best" if val_loss_improved else ""
+                print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}{marker}")
             else:
                 topo_note = "" if last_topo_healthy else "  [topo gate: not saved to best.pt]"
                 print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}  ↑ improved (cos/draw){topo_note}")
         else:
             geo_no_improve += 1
-            print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}"
-                  f"  [{geo_no_improve}/{geo_patience}]")
+            if freeze_trunk_train_policy:
+                marker = "  ↑ policy best" if val_loss_improved else ""
+                print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}{marker}")
+            else:
+                print(f"  Geometry: rank={rank:>5.1f}  wdcos={cos_str}"
+                      f"  [{geo_no_improve}/{geo_patience}]")
         if draw_reg > 0:
             print(f"  Drawness: structural={draw['structural']:.3f}  "
                   f"balanced={draw['balanced']:.3f}  gap={draw['gap']:+.3f}  "
